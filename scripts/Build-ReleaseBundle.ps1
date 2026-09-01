@@ -86,6 +86,9 @@ function New-ZipArchive {
   }
 
   Compress-Archive -Path (Join-Path $SourceRoot '*') -DestinationPath $ArchivePath -CompressionLevel Fastest
+  # 7z.exe（仓库内的精简版 7zr）可能返回 Unsupported archive type；回退压缩成功后
+  # 必须清零原生命令的退出码，否则 PowerShell 会把旧的 7z 错误码作为脚本最终退出码。
+  $global:LASTEXITCODE = 0
 }
 
 function New-EmptyDir {
