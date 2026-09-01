@@ -46,10 +46,17 @@ function Copy-DirectoryContents {
     [string[]]$ExcludeExtensions = @()
   )
 
-  New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-  Get-ChildItem -LiteralPath $Source -Recurse -Force | ForEach-Object {
-    $relative = $_.FullName.Substring($Source.Length).TrimStart('\', '/')
-    $target = Join-Path $Destination $relative
+  if (!(Test-Path -LiteralPath $Source)) {
+    throw "Source directory not found: $Source"
+  }
+
+  # 统一源目录和目标目录的长路径表示，避免 CI 或提权进程使用 8.3
+  # 短路径时，Substring 计算出错误的相对路径。
+  $sourceRoot = (Get-Item -LiteralPath $Source -Force).FullName.TrimEnd('\', '/')
+  $destinationRoot = (New-Item -ItemType Directory -Force -Path $Destination).FullName.TrimEnd('\', '/')
+  Get-ChildItem -LiteralPath $sourceRoot -Recurse -Force | ForEach-Object {
+    $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\', '/')
+    $target = Join-Path $destinationRoot $relative
     if ($_.PSIsContainer) {
       New-Item -ItemType Directory -Force -Path $target | Out-Null
       return

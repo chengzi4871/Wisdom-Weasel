@@ -131,6 +131,16 @@ jobs:
           call build.bat x64
           if errorlevel 1 exit /b 1
 
+      - name: Build Weasel Windows registration helper
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # WeaselSetup 只有 Win32 配置，但它负责把 x64 TSF DLL/IME 注册到 Windows。
+          # 安装器必须携带它，否则仅复制 WeaselServer/WeaselDeployer 不会出现在输入法列表。
+          & msbuild.exe weasel.sln /m /t:WeaselSetup /p:Configuration=Release /p:Platform=Win32 /p:WindowsTargetPlatformVersion=10.0.19041.0
+          if ($LASTEXITCODE -ne 0) { throw "WeaselSetup 编译失败，退出码：$LASTEXITCODE" }
+          if (!(Test-Path -LiteralPath 'output\WeaselSetup.exe')) { throw '未生成 output\WeaselSetup.exe' }
+
       - name: Build Alpha input DLL and its native runtime dependencies
         shell: pwsh
         run: |

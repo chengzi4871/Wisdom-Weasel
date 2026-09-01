@@ -685,13 +685,19 @@ function Copy-DirectoryContents {
     [string[]]$ExcludeExtensions = @()
   )
 
-  if (!(Test-Path $Source)) {
+  if (!(Test-Path -LiteralPath $Source)) {
     throw "Source directory not found: $Source"
   }
 
-  Get-ChildItem -LiteralPath $Source -Recurse -Force | ForEach-Object {
-    $relative = $_.FullName.Substring($Source.Length).TrimStart('\', '/')
-    $target = Join-Path $Destination $relative
+  # 管理员进程中的 %TEMP% 可能是 8.3 短路径（例如 ZHENGX~1），而
+  # Get-ChildItem 返回的 FullName 可能已经展开成长路径。先统一使用文件
+  # 系统返回的规范路径，避免按字符串截取相对路径时丢掉 output 的首字母。
+  $sourceRoot = (Get-Item -LiteralPath $Source -Force).FullName.TrimEnd('\', '/')
+  $destinationRoot = (New-Item -ItemType Directory -Force -Path $Destination).FullName.TrimEnd('\', '/')
+
+  Get-ChildItem -LiteralPath $sourceRoot -Recurse -Force | ForEach-Object {
+    $relative = $_.FullName.Substring($sourceRoot.Length).TrimStart('\', '/')
+    $target = Join-Path $destinationRoot $relative
     if ($_.PSIsContainer) {
       New-Item -ItemType Directory -Path $target -Force | Out-Null
       return
@@ -1619,6 +1625,24 @@ if (-not $SkipOllamaSetup) {
 }
 
 if (-not $SkipDeploy) {
+  $setup = Join-Path $InstallDir 'WeaselSetup.exe'
+  if (!(Test-Path -LiteralPath $setup)) {
+    throw "未找到 WeaselSetup.exe，无法向 Windows 注册小狼毫输入法：$setup"
+  }
+
+  # WeaselSetup 负责把 x64 TSF 输入法复制到系统目录并注册到 Windows。
+  # 先写入用户目录，再执行简体中文静默安装；仅执行 WeaselDeployer /deploy
+  # 只能生成 Rime 配置，不能让输入法出现在 Windows 的输入法列表中。
+  Write-Host '==> 注册小狼毫输入法到 Windows'
+  $userDirProcess = Start-Process -FilePath $setup -ArgumentList ("/userdir:$RimeUserDir") -Wait -PassThru
+  if ($userDirProcess.ExitCode -ne 0) {
+    throw "WeaselSetup 写入 Rime 用户目录失败，退出码：$($userDirProcess.ExitCode)"
+  }
+  $setupProcess = Start-Process -FilePath $setup -ArgumentList '/s' -Wait -PassThru
+  if ($setupProcess.ExitCode -ne 0) {
+    throw "WeaselSetup 注册输入法失败，退出码：$($setupProcess.ExitCode)"
+  }
+
   $deployer = Join-Path $InstallDir 'WeaselDeployer.exe'
   if (Test-Path $deployer) {
     Write-Host "==> 重新部署 Rime"
