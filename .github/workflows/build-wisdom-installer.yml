@@ -85,6 +85,8 @@ jobs:
 
       - name: Fetch Rime dependencies
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = 'Stop'
           .\get-rime.ps1 -use dev

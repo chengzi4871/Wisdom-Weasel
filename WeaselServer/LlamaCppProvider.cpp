@@ -347,17 +347,19 @@ bool LlamaCppProvider::InitializeModel() {
   // 初始化采样器
   llama_sampler_chain_params smpl_params = llama_sampler_chain_default_params();
   llama_sampler* smpl = llama_sampler_chain_init(smpl_params);
+  const llama_vocab* vocab = llama_model_get_vocab(model);
 
   // 常用顺序：penalties -> top_k/top_p/min_p/typical -> temperature -> distribution
   // 其中 mirostat 为自适应采样，开启后通常不叠加 top_k/top_p/min_p/typical。
   llama_sampler_chain_add(smpl, llama_sampler_init_penalties(
+      llama_vocab_n_tokens(vocab),
       -1,
       (float)m_repeat_penalty,
       (float)m_frequency_penalty,
       (float)m_presence_penalty));
 
   if (m_mirostat == 1) {
-    const int n_vocab = llama_vocab_n_tokens((const llama_vocab*)m_vocab);
+    const int n_vocab = llama_vocab_n_tokens(vocab);
     llama_sampler_chain_add(smpl, llama_sampler_init_temp((float)m_temperature));
     llama_sampler_chain_add(smpl, llama_sampler_init_mirostat(
         n_vocab, LLAMA_DEFAULT_SEED, 5.0f, 0.1f, 100));
@@ -380,7 +382,7 @@ bool LlamaCppProvider::InitializeModel() {
 
   // 缓存常用对象，避免在 GenerateText 中重复获取
   m_memory = (void*)llama_get_memory(ctx);
-  m_vocab = (void*)llama_model_get_vocab(model);
+  m_vocab = (void*)vocab;
   m_ctx_size = llama_n_ctx(ctx);
 
   m_model_loaded = true;
