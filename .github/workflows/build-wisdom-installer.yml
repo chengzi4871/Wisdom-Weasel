@@ -152,6 +152,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "WeaselSetup 编译失败，退出码：$LASTEXITCODE" }
           if (!(Test-Path -LiteralPath 'output\WeaselSetup.exe')) { throw '未生成 output\WeaselSetup.exe' }
 
+      - name: Fetch WinSparkle runtime DLLs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # winsparkle.h 通过 pragma comment(lib) 参与链接，但 WinSparkle.dll
+          # 是运行时动态依赖，必须把与仓库 0.6.0 ABI 匹配的两个位数版本一并打包。
+          $archive = Join-Path $env:RUNNER_TEMP 'WinSparkle-0.6.0.zip'
+          $extract = Join-Path $env:RUNNER_TEMP 'WinSparkle-0.6.0'
+          Invoke-WebRequest -Uri 'https://github.com/vslavik/winsparkle/releases/download/v0.6.0/WinSparkle-0.6.0.zip' -OutFile $archive
+          Expand-Archive -LiteralPath $archive -DestinationPath $extract -Force
+          $root = Join-Path $extract 'WinSparkle-0.6.0'
+          Copy-Item -LiteralPath (Join-Path $root 'x64\Release\WinSparkle.dll') -Destination 'output\WinSparkle.dll' -Force
+          Copy-Item -LiteralPath (Join-Path $root 'Release\WinSparkle.dll') -Destination 'output\Win32\WinSparkle.dll' -Force
+          if (!(Test-Path -LiteralPath 'output\WinSparkle.dll')) { throw '未生成 x64 WinSparkle.dll' }
+          if (!(Test-Path -LiteralPath 'output\Win32\WinSparkle.dll')) { throw '未生成 Win32 WinSparkle.dll' }
+
       - name: Build Alpha input DLL and its native runtime dependencies
         shell: pwsh
         run: |

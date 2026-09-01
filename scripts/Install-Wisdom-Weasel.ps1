@@ -1517,6 +1517,23 @@ $alphaRuntimeDir = Join-Path $runtimeDir 'alpha_backend\target\release'
 if (!(Test-Path $appSource)) { throw "Missing runtime output directory: $appSource" }
 if (!(Test-Path $alphaRuntimeDir)) { throw "Missing alpha runtime directory: $alphaRuntimeDir" }
 
+# WeaselServer 是输入法后台进程；缺少动态依赖时它会只弹出系统错误并退出，
+# 用户看到的结果就是输入法只能输出英文。因此在复制前统一检查关键运行文件。
+$requiredRuntimeFiles = @(
+  'WeaselServer.exe',
+  'WeaselDeployer.exe',
+  'WeaselSetup.exe',
+  'weasel.dll',
+  'weaselx64.dll',
+  'WinSparkle.dll'
+)
+$missingRuntimeFiles = @($requiredRuntimeFiles | Where-Object {
+  -not (Test-Path -LiteralPath (Join-Path $appSource $_))
+})
+if ($missingRuntimeFiles.Count -gt 0) {
+  throw "运行时包缺少关键文件：$($missingRuntimeFiles -join ', ')。请下载包含完整依赖的最新 Release。"
+}
+
 Write-Host "==> 复制程序文件到 $InstallDir"
 Copy-DirectoryContents -Source $appSource -Destination $InstallDir -ExcludeExtensions @('.pdb', '.exp', '.lib', '.obj', '.iobj', '.ipdb')
 
