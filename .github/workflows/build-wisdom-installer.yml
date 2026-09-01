@@ -34,6 +34,14 @@ jobs:
         shell: pwsh
         run: Copy-Item -LiteralPath env.vs2022.bat -Destination env.bat -Force
 
+      - name: Fetch plum recipe manager
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (!(Test-Path -LiteralPath plum) -or !(Test-Path -LiteralPath (Join-Path $PWD 'plum\rime-install'))) {
+            git clone --depth 1 https://github.com/rime/plum.git plum
+          }
+
       - name: Cache Boost
         id: cache-boost
         uses: actions/cache@v4
@@ -73,6 +81,7 @@ jobs:
       - name: Build Weasel runtime and Alpha core
         shell: cmd
         run: |
+          set SDKVER=10.0.19041.0
           call build.bat arm64
           if errorlevel 1 exit /b 1
 
