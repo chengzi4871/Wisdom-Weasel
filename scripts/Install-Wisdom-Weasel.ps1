@@ -1,7 +1,8 @@
 ﻿param(
   [string]$InstallDir = "",
   [string]$RimeUserDir = "$env:APPDATA\Rime",
-  [string]$RepoOwner = "Felix3322",
+  # 默认指向当前 fork，确保从本仓库的 Release 获取与安装器版本匹配的 runtime。
+  [string]$RepoOwner = "chengzi4871",
   [string]$RepoName = "Wisdom-Weasel",
   [string]$ReleaseTag = "",
   [string]$SourceRef = "",
