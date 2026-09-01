@@ -11,6 +11,19 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "uxtheme.lib")
 
+// Windows SDK 10.0.19041.0 没有声明 Windows 11 才加入的窗口深色模式和圆角属性。
+// 这些属性在较旧 SDK 上仍可通过 DwmSetWindowAttribute 使用，因此只补充缺失的常量，
+// 避免 GitHub Actions 为了编译 ARM32 而被迫使用不兼容的更高版本 SDK。
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+#ifndef DWMWCP_ROUND
+#define DWMWCP_ROUND 2
+#endif
+
 namespace {
 
 constexpr COLORREF kWindowBackground = RGB(242, 246, 252);

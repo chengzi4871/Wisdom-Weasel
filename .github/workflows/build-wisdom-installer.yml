@@ -42,6 +42,18 @@ jobs:
             git clone --depth 1 https://github.com/rime/plum.git plum
           }
 
+      - name: Prepare generated directories and llama.cpp headers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # get-rime.ps1 只有在 output\Win32 已存在时才会把 librime 的开发文件复制进来。
+          New-Item -ItemType Directory -Force -Path output\Win32 | Out-Null
+          # 仓库只提交了 llama/ggml 的导入库，头文件由构建时固定从上游获取。
+          if (!(Test-Path -LiteralPath (Join-Path $PWD 'llamatest\llama.cpp\include\llama.h'))) {
+            New-Item -ItemType Directory -Force -Path llamatest | Out-Null
+            git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llamatest\llama.cpp
+          }
+
       - name: Cache Boost
         id: cache-boost
         uses: actions/cache@v4
@@ -72,6 +84,32 @@ jobs:
           $ErrorActionPreference = 'Stop'
           .\get-rime.ps1 -use dev
 
+      - name: Build llama.cpp runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 使用与源码完全匹配的 llama/ggml 头文件和 DLL；不能只依赖仓库中可能过期的导入库。
+          cmake -S llamatest\llama.cpp -B llamatest\build -G 'Visual Studio 17 2022' -A x64 `
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF `
+            -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_NATIVE=OFF -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=ON
+          if ($LASTEXITCODE -ne 0) { throw 'llama.cpp CMake 配置失败。' }
+          cmake --build llamatest\build --config Release --target llama -- /m
+          if ($LASTEXITCODE -ne 0) { throw 'llama.cpp 编译失败。' }
+
+          $libNames = @('llama.lib', 'ggml.lib', 'ggml-base.lib')
+          foreach ($name in $libNames) {
+            $source = Get-ChildItem -LiteralPath llamatest\build -Recurse -File -Filter $name |
+              Where-Object { $_.FullName -match '\\Release\\' } | Select-Object -First 1
+            if (!$source) { throw "llama.cpp 构建缺少导入库：$name" }
+            Copy-Item -LiteralPath $source.FullName -Destination (Join-Path lib64 $name) -Force
+          }
+          $dllNames = @('llama.dll', 'ggml.dll', 'ggml-base.dll', 'ggml-cpu.dll')
+          foreach ($name in $dllNames) {
+            $source = Get-ChildItem -LiteralPath llamatest\build -Recurse -File -Filter $name |
+              Where-Object { $_.FullName -match '\\Release\\' } | Select-Object -First 1
+            if ($source) { Copy-Item -LiteralPath $source.FullName -Destination (Join-Path output $name) -Force }
+          }
+
       - name: Build Rime data
         shell: cmd
         run: |
@@ -82,7 +120,8 @@ jobs:
         shell: cmd
         run: |
           set SDKVER=10.0.19041.0
-          call build.bat arm64
+          rem 当前运行时依赖和导入库均为 x64；先生成可在普通 x64 Windows 上使用的安装器。
+          call build.bat x64
           if errorlevel 1 exit /b 1
 
       - name: Build Alpha input DLL and its native runtime dependencies
