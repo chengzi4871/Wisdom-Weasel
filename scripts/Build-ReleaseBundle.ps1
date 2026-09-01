@@ -385,6 +385,17 @@ Copy-Item (Join-Path $root 'scripts\Install-Wisdom-Weasel.cmd') -Destination (Jo
 Write-Host "==> 生成 runtime 包目录"
 Copy-DirectoryContents -Source (Join-Path $root 'output') -Destination (Join-Path $runtimeRoot 'output') -ExcludeExtensions @('.pdb', '.exp', '.lib', '.obj', '.iobj', '.ipdb')
 
+# 64 位 Windows 的 WeaselSetup 会把两个位数的 TSF DLL 分别注册到
+# System32 和 SysWOW64。缺少任意一个文件时，安装器会在注册阶段失败，
+# 并弹出类似“C:\Windows\System32\weasel.dll”的错误，因此在打包前直接拦截。
+$requiredWeaselFiles = @('weasel.dll', 'weaselx64.dll', 'WeaselSetup.exe')
+$missingWeaselFiles = @($requiredWeaselFiles | Where-Object {
+  -not (Test-Path -LiteralPath (Join-Path $runtimeRoot "output\$_"))
+})
+if ($missingWeaselFiles.Count -gt 0) {
+  throw "运行时包缺少 Weasel 注册所需文件：$($missingWeaselFiles -join ', ')。请先构建 Win32 TSF 和 x64 TSF。"
+}
+
 # alpha_input.dll 实际由 third_party/alpha-input crate 生成；同时兼容旧的 alpha_backend 输出布局。
 $alphaRuntimeSource = @(
   (Join-Path $root 'third_party\alpha-input\target\release'),

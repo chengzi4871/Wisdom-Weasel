@@ -127,9 +127,20 @@ jobs:
         shell: cmd
         run: |
           set SDKVER=10.0.19041.0
-          rem 当前运行时依赖和导入库均为 x64；先生成可在普通 x64 Windows 上使用的安装器。
+          rem 先构建 x64 主运行时和 Alpha 核心。
           call build.bat x64
           if errorlevel 1 exit /b 1
+
+      - name: Build Win32 TSF compatibility DLL
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # WeaselSetup 在 64 位 Windows 上会同时向 SysWOW64 和 System32 注册
+          # 32 位、64 位 TSF。x64 构建只生成 weaselx64.dll，缺少 weasel.dll
+          # 会导致安装阶段弹出 C:\Windows\System32\weasel.dll 安装失败。
+          & msbuild.exe weasel.sln /m /t:WeaselTSF /p:Configuration=Release /p:Platform=Win32 /p:WindowsTargetPlatformVersion=10.0.19041.0
+          if ($LASTEXITCODE -ne 0) { throw "Win32 WeaselTSF 编译失败，退出码：$LASTEXITCODE" }
+          if (!(Test-Path -LiteralPath 'output\weasel.dll')) { throw '未生成 output\weasel.dll' }
 
       - name: Build Weasel Windows registration helper
         shell: powershell
