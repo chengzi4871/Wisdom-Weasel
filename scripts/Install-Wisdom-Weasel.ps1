@@ -637,10 +637,14 @@ function Get-LatestRelease {
     [string]$Repo
   )
 
-  $releases = Invoke-GitHubJson "https://api.github.com/repos/$Owner/$Repo/releases?per_page=20"
-  $release = $releases | Where-Object { -not $_.draft } | Select-Object -First 1
-  if (-not $release) {
-    throw "未找到已发布 release：$Owner/$Repo"
+  # GitHub 的 /releases 列表并不保证把最新发布版本放在第一项；
+  # 实际上它可能按创建时间、发布时间或内部排序返回，不能直接 Select-Object -First 1。
+  # /releases/latest 专门返回最新的非草稿、非预发布版本，确保安装器外壳与
+  # 下载的源码/runtime 来自同一个 Release，而不会出现“安装器叫 321589e，
+  # 但实际下载 c7861d5 runtime”的版本错配。
+  $release = Invoke-GitHubJson "https://api.github.com/repos/$Owner/$Repo/releases/latest"
+  if (-not $release -or $release.draft -or $release.prerelease) {
+    throw "未找到可用的最新 release：$Owner/$Repo"
   }
   return $release
 }
