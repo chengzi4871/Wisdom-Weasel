@@ -642,8 +642,8 @@ void AIAssistantDialog::ApplyWindowChrome() {
   BOOL dark_mode = FALSE;
   ::DwmSetWindowAttribute(m_hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark_mode,
                           sizeof(dark_mode));
-  const DWM_WINDOW_CORNER_PREFERENCE corner_preference =
-      DWMWCP_ROUND;
+  // 用整数保存属性值，兼容没有声明 DWM_WINDOW_CORNER_PREFERENCE 类型的旧 SDK。
+  const int corner_preference = DWMWCP_ROUND;
   ::DwmSetWindowAttribute(m_hWnd, DWMWA_WINDOW_CORNER_PREFERENCE,
                           &corner_preference, sizeof(corner_preference));
 }
