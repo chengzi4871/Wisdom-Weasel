@@ -1,0 +1,60 @@
+name: Publish Wisdom-Weasel Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: '包含待发布构建产物的 GitHub Actions run ID'
+        required: true
+        type: string
+      artifact_name:
+        description: '构建产物名称'
+        required: true
+        default: wisdom-weasel-installer-10
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-2022
+    steps:
+      - name: Download installer artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: release-assets
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPOSITORY: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $assetRoot = Join-Path $PWD 'release-assets'
+          $installer = Get-ChildItem -LiteralPath $assetRoot -Recurse -File -Filter 'Wisdom-Weasel-installer-*.exe' | Select-Object -First 1
+          $bootstrap = Get-ChildItem -LiteralPath $assetRoot -Recurse -File -Filter 'Wisdom-Weasel-bootstrap-*.zip' | Select-Object -First 1
+          $runtime = Get-ChildItem -LiteralPath $assetRoot -Recurse -File -Filter 'Wisdom-Weasel-runtime-*.zip' | Select-Object -First 1
+          if (!$installer -or !$bootstrap -or !$runtime) {
+            throw '构建产物缺少 installer、bootstrap 或 runtime 文件。'
+          }
+
+          $prefix = 'Wisdom-Weasel-installer-'
+          $version = $installer.BaseName.Substring($prefix.Length)
+          $tag = "wisdom-weasel-$version"
+          $assets = @($installer.FullName, $bootstrap.FullName, $runtime.FullName)
+
+          & gh release view $tag --repo $env:GH_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release 已存在，拒绝覆盖：$tag"
+          }
+
+          # 安装脚本默认读取最新 Release；发布同一版本的三个资产才能让新安装器
+          # 下载到包含 32 位和 64 位 TSF DLL 的完整 runtime，而不是旧的不完整包。
+          & gh release create $tag @assets --repo $env:GH_REPOSITORY --title "Wisdom-Weasel $version" --notes "修复 Windows 输入法注册并包含完整的 32 位/64 位 TSF 运行时。"
+          if ($LASTEXITCODE -ne 0) { throw "创建 Release 失败，退出码：$LASTEXITCODE" }
