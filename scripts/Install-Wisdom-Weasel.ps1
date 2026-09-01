@@ -87,8 +87,12 @@ function Ensure-Elevated {
   if ($SkipDeploy) { $argList += '-SkipDeploy' }
 
   $shellExe = Get-PowerShellExecutable
-  Start-Process -FilePath $shellExe -Verb RunAs -ArgumentList $argList
-  exit
+  # 等待管理员子进程完成并透传退出码，避免外层安装器提前显示成功并清理临时目录。
+  $elevatedProcess = Start-Process -FilePath $shellExe -Verb RunAs -ArgumentList $argList -Wait -PassThru
+  if ($null -eq $elevatedProcess) {
+    exit 1
+  }
+  exit $elevatedProcess.ExitCode
 }
 
 function Add-WinForms {

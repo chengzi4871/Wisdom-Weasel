@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$RimeUserDir = "$env:APPDATA\\Rime",
   [string]$SourceRoot = ""
 )

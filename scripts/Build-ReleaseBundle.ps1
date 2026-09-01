@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$Version = "",
   [ValidateSet('auto', 'nsis', 'iexpress')]
   [string]$InstallerBackend = 'auto'
@@ -374,7 +374,18 @@ Copy-Item (Join-Path $root 'scripts\Install-Wisdom-Weasel.cmd') -Destination (Jo
 
 Write-Host "==> 生成 runtime 包目录"
 Copy-DirectoryContents -Source (Join-Path $root 'output') -Destination (Join-Path $runtimeRoot 'output') -ExcludeExtensions @('.pdb', '.exp', '.lib', '.obj', '.iobj', '.ipdb')
-Copy-DirectoryContents -Source (Join-Path $root 'alpha_backend\target\release') -Destination (Join-Path $runtimeRoot 'alpha_backend\target\release') -ExcludeExtensions @('.pdb', '.exp', '.lib', '.obj')
+
+# alpha_input.dll 实际由 third_party/alpha-input crate 生成；同时兼容旧的 alpha_backend 输出布局。
+$alphaRuntimeSource = @(
+  (Join-Path $root 'third_party\alpha-input\target\release'),
+  (Join-Path $root 'alpha_backend\target\release')
+) | Where-Object {
+  (Test-Path -LiteralPath $_) -and (Test-Path -LiteralPath (Join-Path $_ 'alpha_input.dll'))
+} | Select-Object -First 1
+if (-not $alphaRuntimeSource) {
+  throw '未找到 Alpha 运行时：请先构建 third_party/alpha-input，且确保生成 alpha_input.dll。'
+}
+Copy-DirectoryContents -Source $alphaRuntimeSource -Destination (Join-Path $runtimeRoot 'alpha_backend\target\release') -ExcludeExtensions @('.pdb', '.exp', '.lib', '.obj')
 
 $installerExe = Join-Path $distRoot ("Wisdom-Weasel-installer-" + $Version + ".exe")
 $bootstrapArchive = Join-Path $distRoot ("Wisdom-Weasel-bootstrap-" + $Version + ".zip")

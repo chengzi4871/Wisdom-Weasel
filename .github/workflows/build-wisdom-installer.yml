@@ -1,0 +1,111 @@
+name: Build Wisdom-Weasel Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      installer_backend:
+        description: '安装器封装方式；auto 优先 NSIS，缺少时回退 IExpress'
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - nsis
+          - iexpress
+
+permissions:
+  contents: read
+
+jobs:
+  build-installer:
+    runs-on: windows-2022
+    env:
+      boost_version: 1.84.0
+      BOOST_ROOT: ${{ github.workspace }}\deps\boost_1_84_0
+
+    steps:
+      - name: Checkout source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          fetch-depth: 0
+
+      - name: Configure build environment
+        shell: pwsh
+        run: Copy-Item -LiteralPath env.vs2022.bat -Destination env.bat -Force
+
+      - name: Cache Boost
+        id: cache-boost
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BOOST_ROOT }}
+          key: ${{ runner.os }}-boost-${{ env.boost_version }}
+
+      - name: Install and build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        shell: cmd
+        run: |
+          call install_boost.bat
+          if errorlevel 1 exit /b 1
+          call build.bat boost arm64
+          if errorlevel 1 exit /b 1
+
+      - name: Load MSVC toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          sdk: 10.0.19041.0
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Fetch Rime dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\get-rime.ps1 -use dev
+
+      - name: Build Rime data
+        shell: cmd
+        run: |
+          call build.bat data
+          if errorlevel 1 exit /b 1
+
+      - name: Build Weasel runtime and Alpha core
+        shell: cmd
+        run: |
+          call build.bat arm64
+          if errorlevel 1 exit /b 1
+
+      - name: Build Alpha input DLL and its native runtime dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --release --manifest-path third_party/alpha-input/Cargo.toml
+          $alphaDir = 'third_party/alpha-input/target/release'
+          $requiredFiles = @('alpha_input.dll', 'onnxruntime.dll', 'onnxruntime_providers_shared.dll')
+          foreach ($file in $requiredFiles) {
+            $path = Join-Path $alphaDir $file
+            if (!(Test-Path -LiteralPath $path)) {
+              throw "Alpha 构建缺少运行时文件：$path"
+            }
+          }
+
+      - name: Build Wisdom-Weasel installer bundle
+        shell: pwsh
+        env:
+          INSTALLER_BACKEND: ${{ inputs.installer_backend }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\scripts\Build-ReleaseBundle.ps1 -InstallerBackend $env:INSTALLER_BACKEND
+
+      - name: Upload Wisdom-Weasel installer artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wisdom-weasel-installer-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            archives/Wisdom-Weasel-installer-*.exe
+            archives/Wisdom-Weasel-bootstrap-*.zip
+            archives/Wisdom-Weasel-runtime-*.zip
+            archives/Wisdom-Weasel-release-assets-*.txt
