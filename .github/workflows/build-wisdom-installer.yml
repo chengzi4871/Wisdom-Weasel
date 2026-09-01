@@ -53,6 +53,11 @@ jobs:
             New-Item -ItemType Directory -Force -Path llamatest | Out-Null
             git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llamatest\llama.cpp
           }
+          # 兼容旧项目配置中引用的 llamatest\ggml\include 路径；只复制头文件，不重复复制源码。
+          if (!(Test-Path -LiteralPath (Join-Path $PWD 'llamatest\ggml\include\ggml.h'))) {
+            New-Item -ItemType Directory -Force -Path llamatest\ggml | Out-Null
+            Copy-Item -LiteralPath llamatest\llama.cpp\ggml\include -Destination llamatest\ggml -Recurse -Force
+          }
 
       - name: Cache Boost
         id: cache-boost
