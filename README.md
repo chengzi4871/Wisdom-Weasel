@@ -898,6 +898,13 @@ Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8013/v1/transcribe -Form @{
 - 是否有 `lua_gears.cc` / `alpha_rerank.lua` 报错
 - `%APPDATA%\Rime\lua\wanxiang` 里的运行时文件是否真的是刚替换的版本
 
+如果安装了 RivaTuner Statistics Server（常随 MSI Afterburner 一起运行），
+其全局图形注入可能导致 `WeaselDeployer.exe` 以 `0xc0000409` 崩溃，表现为
+只能输入英文、无法打开输入法设定。安装器会自动为 `WeaselSetup.exe`、
+`WeaselDeployer.exe`、`WeaselServer.exe` 和 `WeaselAIAssistant.exe` 写入独立的
+RTSS 排除配置（`EnableHooking=0`），不会关闭其他程序的帧率显示；同时会检查
+部署器退出码，避免把崩溃误报为安装成功。
+
 如果出现“AI 助手能打开，但 ASR 不工作”，优先检查：
 
 - `http://127.0.0.1:8013/health` 是否可访问

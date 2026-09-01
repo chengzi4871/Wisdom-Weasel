@@ -1401,6 +1401,115 @@ function Remove-LegacyAlphaSourceModel {
   }
 }
 
+function Get-RtssProfileDirectories {
+  # RTSS 通常安装在 Program Files (x86)，但用户也可能选择自定义目录。
+  # 同时检查卸载信息和标准路径，避免把安装器绑定到某个固定盘符。
+  $installRoots = New-Object System.Collections.Generic.List[string]
+  $uninstallRoots = @(
+    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*'
+  )
+
+  foreach ($entry in (Get-ItemProperty $uninstallRoots -ErrorAction SilentlyContinue)) {
+    if ($entry.DisplayName -notlike 'RivaTuner Statistics Server*') {
+      continue
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($entry.InstallLocation)) {
+      $installRoots.Add(([string]$entry.InstallLocation).Trim().TrimEnd('\'))
+      continue
+    }
+
+    # 部分 RTSS 版本不填写 InstallLocation，只在卸载命令中留下安装目录。
+    if ([string]$entry.UninstallString -match '^\s*"?([^\"]*\\uninstall\.exe)') {
+      $installRoots.Add((Split-Path -Parent $matches[1]))
+    }
+  }
+
+  $programFilesX86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86)
+  if (-not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+    $installRoots.Add((Join-Path $programFilesX86 'RivaTuner Statistics Server'))
+  }
+
+  return @($installRoots |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    Select-Object -Unique |
+    ForEach-Object { Join-Path $_ 'Profiles' } |
+    Where-Object { Test-Path -LiteralPath $_ -PathType Container })
+}
+
+function Set-RtssApplicationExclusion {
+  param(
+    [string]$ProfilesDirectory,
+    [string]$ExecutableName
+  )
+
+  $profilePath = Join-Path $ProfilesDirectory ($ExecutableName + '.cfg')
+  $newSetting = 'EnableHooking' + "`t`t= 0"
+  $content = if (Test-Path -LiteralPath $profilePath) {
+    Get-Content -LiteralPath $profilePath -Raw -Encoding Default
+  } else {
+    ''
+  }
+
+  # 只修改 [Hooking] 段中的 EnableHooking，完整保留用户为该程序设置的
+  # 其他 RTSS 参数。已有配置发生变化时先留一份可人工恢复的备份。
+  $updated = $content
+  $hookingMatch = [regex]::Match($content, '(?ms)^\[Hooking\]\s*\r?\n(?<body>.*?)(?=^\[|\z)')
+  if ($hookingMatch.Success) {
+    $body = $hookingMatch.Groups['body'].Value
+    if ($body -match '(?m)^\s*EnableHooking\s*=') {
+      $newBody = [regex]::Replace($body, '(?m)^\s*EnableHooking\s*=.*$', $newSetting, 1)
+    } else {
+      $newBody = $newSetting + "`r`n" + $body
+    }
+    $updated = $content.Substring(0, $hookingMatch.Groups['body'].Index) +
+      $newBody +
+      $content.Substring($hookingMatch.Groups['body'].Index + $hookingMatch.Groups['body'].Length)
+  } else {
+    $separator = if ([string]::IsNullOrEmpty($content) -or $content.EndsWith("`n")) { '' } else { "`r`n" }
+    $updated = $content + $separator + '[Hooking]' + "`r`n" + $newSetting + "`r`n"
+  }
+
+  if ($updated -ne $content) {
+    if (Test-Path -LiteralPath $profilePath) {
+      $backupPath = '{0}.pre-wisdom-weasel.{1}.bak' -f $profilePath, (New-TimestampString)
+      Copy-Item -LiteralPath $profilePath -Destination $backupPath -Force
+    }
+    Set-Content -LiteralPath $profilePath -Value $updated -Encoding Ascii -NoNewline
+  }
+
+  $verified = Get-Content -LiteralPath $profilePath -Raw -Encoding Default
+  if ($verified -notmatch '(?ms)^\[Hooking\]\s*\r?\n(?:(?!^\[).)*?^\s*EnableHooking\s*=\s*0\s*$') {
+    throw "无法验证 RTSS 排除配置：$profilePath"
+  }
+}
+
+function Protect-WeaselFromRtssInjection {
+  $profileDirectories = @(Get-RtssProfileDirectories)
+  if ($profileDirectories.Count -eq 0) {
+    return '未检测到 RTSS，无需配置排除。'
+  }
+
+  # RTSS 的全局图形注入会破坏 librime 初始化参数，并导致 WeaselDeployer
+  # 以 0xc0000409 崩溃。为小狼毫全部原生进程建立排除，不能只保护部署器，
+  # 否则后台服务或 AI 助手仍可能在输入过程中被注入。
+  $executables = @(
+    'WeaselSetup.exe',
+    'WeaselDeployer.exe',
+    'WeaselServer.exe',
+    'WeaselAIAssistant.exe'
+  )
+
+  foreach ($profilesDirectory in $profileDirectories) {
+    foreach ($executable in $executables) {
+      Set-RtssApplicationExclusion -ProfilesDirectory $profilesDirectory -ExecutableName $executable
+    }
+  }
+
+  return "已为小狼毫配置 RTSS 注入排除：$($profileDirectories -join ', ')"
+}
+
 function Open-GuiGuide {
   param(
     [string]$TargetDir,
@@ -1409,6 +1518,7 @@ function Open-GuiGuide {
     [string]$ModelStatus,
     [string]$ReleaseTagValue,
     [string]$OllamaStatus,
+    [string]$RtssStatus,
     [string]$WeaselCustomBackupPath
   )
 
@@ -1434,6 +1544,9 @@ $ModelStatus
 
 Ollama 预测：
 $OllamaStatus
+
+RTSS / MSI Afterburner 兼容性：
+$RtssStatus
 
 weasel.custom.yaml 备份：
 $backupDisplay
@@ -1626,6 +1739,7 @@ Write-WanxiangPatches -RimeDir $RimeUserDir -AlphaDllPath $alphaDll -AlphaConfig
 $weaselCustomPath = Join-Path $RimeUserDir 'weasel.custom.yaml'
 $weaselCustomBackupPath = $null
 $ollamaStatus = '已跳过 Ollama 预测安装。'
+$rtssStatus = '尚未检查 RTSS。'
 $ollamaChatUrl = Get-OllamaChatCompletionsUrl -BaseUrl $OllamaBaseUrl
 
 if (-not $SkipOllamaSetup) {
@@ -1646,6 +1760,10 @@ if (-not $SkipOllamaSetup) {
 }
 
 if (-not $SkipDeploy) {
+  Write-Host '==> 检查 RTSS / MSI Afterburner 兼容性'
+  $rtssStatus = Protect-WeaselFromRtssInjection
+  Write-Host $rtssStatus
+
   $setup = Join-Path $InstallDir 'WeaselSetup.exe'
   if (!(Test-Path -LiteralPath $setup)) {
     throw "未找到 WeaselSetup.exe，无法向 Windows 注册小狼毫输入法：$setup"
@@ -1667,14 +1785,19 @@ if (-not $SkipDeploy) {
   $deployer = Join-Path $InstallDir 'WeaselDeployer.exe'
   if (Test-Path $deployer) {
     Write-Host "==> 重新部署 Rime"
-    Start-Process -FilePath $deployer -ArgumentList '/deploy' -Wait
+    # 必须检查实际退出码。旧逻辑只等待进程结束，即使部署器被第三方注入
+    # 后崩溃，也会继续显示“安装完成”，造成只能输入英文的假成功状态。
+    $deployProcess = Start-Process -FilePath $deployer -ArgumentList '/deploy' -Wait -PassThru
+    if ($deployProcess.ExitCode -ne 0) {
+      throw ("WeaselDeployer 部署失败，退出码：0x{0:X8}。请检查是否仍有 RTSS、覆盖层或安全软件向小狼毫注入。" -f ($deployProcess.ExitCode -band 0xffffffffL))
+    }
     Start-Process -FilePath $deployer
   }
 }
 
 Start-Process explorer.exe $RimeUserDir
 if (-not $SkipGuiGuide) {
-  Open-GuiGuide -TargetDir $InstallDir -RimeDir $RimeUserDir -AlphaEnabled $alphaEnabled -ModelStatus $modelStatus -ReleaseTagValue $release.tag_name -OllamaStatus $ollamaStatus -WeaselCustomBackupPath $weaselCustomBackupPath
+  Open-GuiGuide -TargetDir $InstallDir -RimeDir $RimeUserDir -AlphaEnabled $alphaEnabled -ModelStatus $modelStatus -ReleaseTagValue $release.tag_name -OllamaStatus $ollamaStatus -RtssStatus $rtssStatus -WeaselCustomBackupPath $weaselCustomBackupPath
 }
 
 Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
@@ -1690,6 +1813,7 @@ if (-not [string]::IsNullOrWhiteSpace($OllamaModel)) {
   Write-Host "Ollama 模型: $OllamaModel"
 }
 Write-Host "Ollama 状态: $ollamaStatus"
+Write-Host "RTSS 兼容性: $rtssStatus"
 Write-Host "weasel.custom.yaml: $weaselCustomPath"
 if ($weaselCustomBackupPath) {
   Write-Host "weasel.custom.yaml 备份: $weaselCustomBackupPath"
