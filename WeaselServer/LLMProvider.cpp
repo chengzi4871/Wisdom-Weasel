@@ -1456,12 +1456,18 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
                                         : m_api_url.substr(0, path_start);
     const std::string chat_url = ollama_origin + "/api/chat";
     const std::wstring system_prompt =
-        L"你是中文输入法的下一词预测器。预测能直接接在用户文本后面的候选，"
-        L"拼接后必须语法通顺。每行只输出一个候选，不要编号、解释或前后缀。"
-        L"前3项必须是2至4个汉字，其余项不超过12个汉字；各项开头两个汉字尽量"
-        L"不同，并按自然程度排序。情绪场景的最后一项可用 emoji。严格输出 " +
+        L"你是中文输入法的下一词预测器。只输出能直接接在文本末尾的候选，每行"
+        L"一个，不要编号或解释。第1至3行是2至4个汉字且含义不同的短词；第4行"
+        L"是6至12个汉字的完整短句；第5行是不同方向的2至12字补充，情绪场景可"
+        L"为 emoji。禁止复制已输入文本。严格输出 " +
         std::to_wstring(request.max_candidates) + L" 个候选。";
     const std::wstring user_prompt = L"已输入文本：" + request.context;
+    // 小模型仅看到抽象长度规则时，常会把五项都压缩成短词。加入一个极短的
+    // few-shot 样例，明确第四项应当是可直接上屏的短句，而不是继续输出同质
+    // 词汇；样例本身固定且很短，对 1024 上下文和预填充耗时影响有限。
+    const std::wstring example_user = L"已输入文本：会议结束后，我们要";
+    const std::wstring example_assistant =
+        L"复盘工作\n整理资料\n尽快确认\n确认下一步工作安排\n同步相关会议结论";
 
     std::ostringstream json;
     json << "{"
@@ -1470,6 +1476,12 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
          << "\"messages\":["
          << "{\"role\":\"system\",\"content\":\""
          << weasel::config_json::EscapeJsonString(wtou8(system_prompt))
+         << "\"},"
+         << "{\"role\":\"user\",\"content\":\""
+         << weasel::config_json::EscapeJsonString(wtou8(example_user))
+         << "\"},"
+         << "{\"role\":\"assistant\",\"content\":\""
+         << weasel::config_json::EscapeJsonString(wtou8(example_assistant))
          << "\"},"
          << "{\"role\":\"user\",\"content\":\""
          << weasel::config_json::EscapeJsonString(wtou8(user_prompt))
