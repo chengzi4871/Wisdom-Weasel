@@ -478,7 +478,8 @@ patch:
   alpha_rerank/single_char_user_frequency_scale: 0.10
   alpha_rerank/short_candidate_user_frequency_scale: 0.25
   alpha_rerank/preserve_first_min_chars: 0
-  alpha_rerank/log_enabled: true
+  alpha_rerank/prewarm_enabled: false
+  alpha_rerank/log_enabled: false
   alpha_rerank/log_path: ""
 ```
 
@@ -504,6 +505,9 @@ patch:
   - 如果你想恢复“首候选达到某个长度后保位”的旧 workaround，可以手动把它设成正数
 - `alpha_rerank/prefer_sentence_boundary: true`
   - 上下文优先按更干净的句子 / 子句边界截断
+- `alpha_rerank/prewarm_enabled: false`
+  - 默认不在提交回调中同步预热，避免上屏时停顿
+  - 新版运行时会将多个上下文变体合并为一次 ONNX 批量推理
 - `alpha_rerank/log_path`
   - 可选；如果开启 `log_enabled: true` 但不手动指定路径，优先跟随 `WeaselServer` 内部审计日志路径
   - 未桥接时回退到 `%APPDATA%\Rime\alpha_rerank.log`

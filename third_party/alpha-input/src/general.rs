@@ -64,6 +64,21 @@ impl<T: TypeToTensorElementDataType + Clone + TensorDataToType + FromPrimitive> 
             return Err(GeneralError::EmptySequence);
         }
 
+        // 新版模型使用动态 batch，一次 ONNX 调用即可处理全部查询。旧安装中导出的
+        // 模型可能仍固定为 batch=1；为保证原有模型可以继续使用，批量调用失败时
+        // 自动退回逐条推理。该回退只影响性能，不改变向量及排序结果。
+        if inputs.len() > 1 {
+            match self.get_predict_vectors_batch(inputs) {
+                Ok(vectors) => return Ok(vectors),
+                Err(error) => {
+                    info!(
+                        "Batched inference is unavailable; falling back to scalar inference: {}",
+                        error
+                    );
+                }
+            }
+        }
+
         let mut pooled_rows = Vec::new();
         let mut hidden_size = 0usize;
         for input in inputs {
@@ -92,6 +107,121 @@ impl<T: TypeToTensorElementDataType + Clone + TensorDataToType + FromPrimitive> 
 }
 
 impl<T: TypeToTensorElementDataType + Clone + TensorDataToType + FromPrimitive> General<T> {
+    /// 将多条文本填充到同一个二维张量中，并在一次 Session::run 中完成推理。
+    /// 每一行仍按各自的有效 token 数做平均池化，因此结果与逐条推理一致。
+    fn get_predict_vectors_batch(&self, inputs: &[&str]) -> Result<Array2<T>, GeneralError> {
+        let batch_size = inputs.len();
+        if batch_size == 0 {
+            return Err(GeneralError::EmptySequence);
+        }
+
+        let pad_token_id = self
+            .tokenizer
+            .get_padding()
+            .map(|padding| padding.pad_id as i64)
+            .unwrap_or(0);
+        let mut all_input_ids = Vec::with_capacity(batch_size * self.max_input_length);
+        let mut all_attention_masks = Vec::with_capacity(batch_size * self.max_input_length);
+        let mut sequence_lengths = Vec::with_capacity(batch_size);
+
+        for input in inputs {
+            let encoding = self
+                .tokenizer
+                .encode(*input, true)
+                .map_err(|error| GeneralError::Tokenization(error.to_string()))?;
+            let token_count = encoding.get_ids().len();
+            if token_count > self.max_input_length {
+                return Err(GeneralError::InputTooLong(
+                    token_count,
+                    self.max_input_length,
+                ));
+            }
+
+            let sequence_length = encoding
+                .get_attention_mask()
+                .iter()
+                .filter(|&&value| value == 1)
+                .count();
+            if sequence_length == 0 {
+                return Err(GeneralError::EmptySequence);
+            }
+            sequence_lengths.push(sequence_length);
+
+            all_input_ids.extend(encoding.get_ids().iter().map(|&value| value as i64));
+            all_input_ids.resize(
+                all_input_ids.len() + (self.max_input_length - token_count),
+                pad_token_id,
+            );
+
+            let mask_start = all_attention_masks.len();
+            all_attention_masks.extend(
+                encoding
+                    .get_attention_mask()
+                    .iter()
+                    .map(|&value| value as i64),
+            );
+            all_attention_masks.resize(mask_start + self.max_input_length, 0);
+        }
+
+        let input_ids_array = CowArray::from(
+            Array::from_shape_vec(
+                (batch_size, self.max_input_length),
+                all_input_ids,
+            )
+            .map_err(|error| GeneralError::ArrayCreation(error.to_string()))?
+            .into_dyn(),
+        );
+        let attention_mask_array = CowArray::from(
+            Array::from_shape_vec(
+                (batch_size, self.max_input_length),
+                all_attention_masks,
+            )
+            .map_err(|error| GeneralError::ArrayCreation(error.to_string()))?
+            .into_dyn(),
+        );
+        let model_inputs = vec![
+            Value::from_array(self.session.allocator(), &input_ids_array)
+                .map_err(GeneralError::ValueCreation)?,
+            Value::from_array(self.session.allocator(), &attention_mask_array)
+                .map_err(GeneralError::ValueCreation)?,
+        ];
+
+        let outputs = self
+            .session
+            .run(model_inputs)
+            .map_err(GeneralError::Inference)?;
+        let hidden_state = outputs[0]
+            .try_extract::<f32>()
+            .map_err(GeneralError::TensorExtraction)?;
+        let hidden_state_view = hidden_state.view();
+        let shape = hidden_state_view.shape();
+        if shape.len() != 3 || shape[0] != batch_size || shape[1] == 0 || shape[2] == 0 {
+            return Err(GeneralError::UnexpectedShape(shape.to_vec()));
+        }
+
+        let hidden_size = shape[2];
+        let mut pooled_rows = Vec::with_capacity(batch_size * hidden_size);
+        for (batch_index, &sequence_length) in sequence_lengths.iter().enumerate() {
+            let valid_sequence_length = sequence_length.min(shape[1]);
+            if valid_sequence_length == 0 {
+                return Err(GeneralError::EmptySequence);
+            }
+            let batch_hidden_state = hidden_state_view.index_axis(Axis(0), batch_index);
+            let mean_pooled = batch_hidden_state
+                .slice(s![0..valid_sequence_length, ..])
+                .mean_axis(Axis(0))
+                .ok_or(GeneralError::EmptySequence)?;
+            pooled_rows.extend(
+                mean_pooled
+                    .iter()
+                    .map(|&value| T::from_f32(value).unwrap()),
+            );
+        }
+
+        Array2::from_shape_vec((batch_size, hidden_size), pooled_rows)
+            .map_err(|error| GeneralError::Reshape(error.to_string()))
+    }
+
     fn get_predict_vector_single(&self, input: &str) -> Result<Array2<T>, GeneralError> {
         debug!("Getting prediction vector for input: '{}'", input);
         let encoding = self.tokenizer.encode(input, true).map_err(|e| {

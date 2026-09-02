@@ -107,6 +107,13 @@ def export_model(model_id: str, output_dir: str, quantize: str | None, opset: in
         do_constant_folding=True,
         training=torch.onnx.TrainingMode.EVAL,
         dynamo=False,
+        # Alpha 会同时计算多个上下文变体。只开放 batch 维度，序列长度仍固定，
+        # 既便于 ONNX Runtime 优化图，也避免为每个变体重复启动一次模型。
+        dynamic_axes={
+            "input_ids": {0: "batch_size"},
+            "attention_mask": {0: "batch_size"},
+            "last_hidden_state": {0: "batch_size"},
+        },
     )
 
     if quantize == "int8":

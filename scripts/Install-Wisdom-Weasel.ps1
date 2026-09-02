@@ -920,7 +920,9 @@ patch:
   alpha_rerank/function_word_semantic_penalty: 0.12
   # 默认不再用“固定第一候选”的旧 workaround
   alpha_rerank/preserve_first_min_chars: 0
-  alpha_rerank/log_enabled: true
+  # 预热会阻塞提交回调；批量推理启用后默认关闭，需要诊断时再临时开启。
+  alpha_rerank/prewarm_enabled: false
+  alpha_rerank/log_enabled: false
   # 留空时优先跟随 WeaselServer 内部审计日志路径；未桥接时回退到 %APPDATA%\Rime\alpha_rerank.log
   alpha_rerank/log_path: ""
   # 旧 HTTP 译码链路默认关闭，保留配置仅为兼容旧环境

@@ -230,6 +230,26 @@ impl AlphaPredictive {
             .map_err(AlphaError::Predictive)
     }
 
+    pub fn compute_similarities_batch(
+        &self,
+        inputs: &[String],
+        candidates: &[String],
+    ) -> Result<Vec<Vec<(String, f32)>>, AlphaError> {
+        self.predictive
+            .compute_similarities_batch(inputs, candidates)
+            .map_err(AlphaError::Predictive)
+    }
+
+    pub fn compute_score_breakdowns_batch(
+        &self,
+        inputs: &[String],
+        candidates: &[String],
+    ) -> Result<Vec<Vec<CandidateScoreBreakdown>>, AlphaError> {
+        self.predictive
+            .compute_score_breakdowns_batch(inputs, candidates)
+            .map_err(AlphaError::Predictive)
+    }
+
     pub fn warm_query(&self, input: &str) -> Result<(), AlphaError> {
         self.predictive
             .warm_query(input)
@@ -290,6 +310,25 @@ pub struct SimilarityResult {
 
 #[repr(C)]
 pub struct SimilarityBreakdownResult {
+    word: *mut c_char,
+    semantic_score: c_float,
+    preference_score: c_float,
+    user_frequency_score: c_float,
+    final_score: c_float,
+    dynamic_preference_factor: c_float,
+}
+
+/// 批量结果使用查询下标标识所属上下文，内存仍由 alpha_input.dll 统一释放。
+#[repr(C)]
+pub struct BatchSimilarityResult {
+    query_index: c_int,
+    word: *mut c_char,
+    score: c_float,
+}
+
+#[repr(C)]
+pub struct BatchSimilarityBreakdownResult {
+    query_index: c_int,
     word: *mut c_char,
     semantic_score: c_float,
     preference_score: c_float,
@@ -459,6 +498,109 @@ pub extern "C" fn alpha_predictive_compute_score_breakdowns_ordered(
 
 #[allow(improper_ctypes_definitions)]
 #[unsafe(no_mangle)]
+pub extern "C" fn alpha_predictive_compute_similarities_batch_ordered(
+    predictive: *mut AlphaPredictive,
+    inputs: *const *const c_char,
+    num_inputs: c_int,
+    candidates: *const *const c_char,
+    num_candidates: c_int,
+    results: *mut *mut BatchSimilarityResult,
+) -> c_int {
+    unsafe {
+        if predictive.is_null() || inputs.is_null() || results.is_null() || num_inputs <= 0 {
+            return -1;
+        }
+        let predictive = &*predictive;
+        let rust_inputs = c_string_array(inputs, num_inputs);
+        let rust_candidates = c_string_array(candidates, num_candidates);
+
+        match predictive.compute_similarities_batch(&rust_inputs, &rust_candidates) {
+            Ok(batches) => {
+                let mut c_results = Vec::with_capacity(batches.len() * rust_candidates.len());
+                for (query_index, mut items) in batches.into_iter().enumerate() {
+                    items.sort_by(|left, right| {
+                        right
+                            .1
+                            .partial_cmp(&left.1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    for (word, score) in items {
+                        c_results.push(BatchSimilarityResult {
+                            query_index: query_index as c_int,
+                            word: CString::new(word).unwrap().into_raw(),
+                            score,
+                        });
+                    }
+                }
+                let boxed_results = c_results.into_boxed_slice();
+                let len = boxed_results.len();
+                *results = Box::into_raw(boxed_results) as *mut BatchSimilarityResult;
+                len as c_int
+            }
+            Err(error) => {
+                eprintln!("Error computing batched similarities: {:?}", error);
+                -1
+            }
+        }
+    }
+}
+
+#[allow(improper_ctypes_definitions)]
+#[unsafe(no_mangle)]
+pub extern "C" fn alpha_predictive_compute_score_breakdowns_batch_ordered(
+    predictive: *mut AlphaPredictive,
+    inputs: *const *const c_char,
+    num_inputs: c_int,
+    candidates: *const *const c_char,
+    num_candidates: c_int,
+    results: *mut *mut BatchSimilarityBreakdownResult,
+) -> c_int {
+    unsafe {
+        if predictive.is_null() || inputs.is_null() || results.is_null() || num_inputs <= 0 {
+            return -1;
+        }
+        let predictive = &*predictive;
+        let rust_inputs = c_string_array(inputs, num_inputs);
+        let rust_candidates = c_string_array(candidates, num_candidates);
+
+        match predictive.compute_score_breakdowns_batch(&rust_inputs, &rust_candidates) {
+            Ok(batches) => {
+                let mut c_results = Vec::with_capacity(batches.len() * rust_candidates.len());
+                for (query_index, mut items) in batches.into_iter().enumerate() {
+                    items.sort_by(|left, right| {
+                        right
+                            .final_score
+                            .partial_cmp(&left.final_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    for item in items {
+                        c_results.push(BatchSimilarityBreakdownResult {
+                            query_index: query_index as c_int,
+                            word: CString::new(item.candidate).unwrap().into_raw(),
+                            semantic_score: item.semantic_score,
+                            preference_score: item.preference_score,
+                            user_frequency_score: item.user_frequency_score,
+                            final_score: item.final_score,
+                            dynamic_preference_factor: item.dynamic_preference_factor,
+                        });
+                    }
+                }
+                let boxed_results = c_results.into_boxed_slice();
+                let len = boxed_results.len();
+                *results =
+                    Box::into_raw(boxed_results) as *mut BatchSimilarityBreakdownResult;
+                len as c_int
+            }
+            Err(error) => {
+                eprintln!("Error computing batched score breakdowns: {:?}", error);
+                -1
+            }
+        }
+    }
+}
+
+#[allow(improper_ctypes_definitions)]
+#[unsafe(no_mangle)]
 pub extern "C" fn alpha_predictive_warm_query(
     predictive: *mut AlphaPredictive,
     input: *const c_char,
@@ -568,6 +710,59 @@ pub extern "C" fn alpha_predictive_free_similarity_breakdown_result(
             let _ = CString::from_raw(result.word);
         }
     }
+}
+
+#[allow(improper_ctypes_definitions)]
+#[unsafe(no_mangle)]
+pub extern "C" fn alpha_predictive_free_batch_similarities_result(
+    results: *mut BatchSimilarityResult,
+    len: c_int,
+) {
+    unsafe {
+        if results.is_null() {
+            return;
+        }
+        let slice = Box::from_raw(std::slice::from_raw_parts_mut(results, len as usize));
+        for result in slice.into_vec() {
+            let _ = CString::from_raw(result.word);
+        }
+    }
+}
+
+#[allow(improper_ctypes_definitions)]
+#[unsafe(no_mangle)]
+pub extern "C" fn alpha_predictive_free_batch_similarity_breakdown_result(
+    results: *mut BatchSimilarityBreakdownResult,
+    len: c_int,
+) {
+    unsafe {
+        if results.is_null() {
+            return;
+        }
+        let slice = Box::from_raw(std::slice::from_raw_parts_mut(results, len as usize));
+        for result in slice.into_vec() {
+            let _ = CString::from_raw(result.word);
+        }
+    }
+}
+
+unsafe fn c_string_array(values: *const *const c_char, count: c_int) -> Vec<String> {
+    let mut output = Vec::with_capacity(count.max(0) as usize);
+    if values.is_null() || count <= 0 {
+        return output;
+    }
+    for index in 0..count {
+        let value_ptr = unsafe { *values.offset(index as isize) };
+        if value_ptr.is_null() {
+            output.push(String::new());
+            continue;
+        }
+        let value = unsafe { CStr::from_ptr(value_ptr) }
+            .to_string_lossy()
+            .into_owned();
+        output.push(value);
+    }
+    output
 }
 
 fn initialize_tracing() {

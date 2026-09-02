@@ -198,6 +198,25 @@ where
             .collect())
     }
 
+    /// 为同一组候选批量计算多个上下文的相似度。查询向量会合并成一次模型调用，
+    /// 候选向量、偏好和词频仍沿用原有公式，因此结果与逐个调用一致。
+    pub fn compute_similarities_batch(
+        &self,
+        inputs: &[String],
+        candidates: &[String],
+    ) -> Result<Vec<Vec<(String, f32)>>, PredictiveError> {
+        Ok(self
+            .compute_score_breakdowns_batch(inputs, candidates)?
+            .into_iter()
+            .map(|items| {
+                items
+                    .into_iter()
+                    .map(|item| (item.candidate, item.final_score))
+                    .collect()
+            })
+            .collect())
+    }
+
     pub fn compute_score_breakdowns(
         &self,
         input: &str,
@@ -210,6 +229,32 @@ where
         );
 
         let target = self.get_query_embedding(input)?;
+        self.compute_score_breakdowns_with_target(input, candidates, &target)
+    }
+
+    /// 批量取得所有查询向量后，再分别执行完全相同的候选评分逻辑。
+    pub fn compute_score_breakdowns_batch(
+        &self,
+        inputs: &[String],
+        candidates: &[String],
+    ) -> Result<Vec<Vec<CandidateScoreBreakdown>>, PredictiveError> {
+        let input_refs = inputs.iter().map(String::as_str).collect::<Vec<_>>();
+        let targets = self.get_query_embeddings(&input_refs)?;
+        inputs
+            .iter()
+            .zip(targets.iter())
+            .map(|(input, target)| {
+                self.compute_score_breakdowns_with_target(input, candidates, target)
+            })
+            .collect()
+    }
+
+    fn compute_score_breakdowns_with_target(
+        &self,
+        input: &str,
+        candidates: &[String],
+        target: &CachedEmbedding,
+    ) -> Result<Vec<CandidateScoreBreakdown>, PredictiveError> {
         let preference_scorer = self.preference_scorer();
         let user_frequency_scorer = self.user_frequency_scorer();
         let mut candidate_infos = Vec::with_capacity(candidates.len());
@@ -217,12 +262,12 @@ where
 
         for candidate in candidates {
             let embedding = self.get_candidate_embedding(candidate)?;
-            let semantic_score = embedding.cosine_similarity(&target);
+            let semantic_score = embedding.cosine_similarity(target);
             semantic_scores.push(semantic_score);
             candidate_infos.push((candidate.clone(), embedding, semantic_score));
         }
 
-        self.refine_semantic_scores(input, candidates, &target, &mut semantic_scores)?;
+        self.refine_semantic_scores(input, candidates, target, &mut semantic_scores)?;
         for (index, info) in candidate_infos.iter_mut().enumerate() {
             info.2 = semantic_scores[index];
         }
@@ -314,21 +359,62 @@ where
     }
 
     fn get_query_embedding(&self, input: &str) -> Result<CachedEmbedding, PredictiveError> {
-        if let Some(cached) = self.query_cache.lock().unwrap().get(input) {
-            return Ok(cached);
+        self.get_query_embeddings(&[input])?
+            .into_iter()
+            .next()
+            .ok_or(PredictiveError::Model(GeneralError::EmptySequence))
+    }
+
+    /// 一次收集缓存未命中的查询并批量编码，最后按传入顺序还原结果。
+    /// 缓存命中项不会进入模型；同一批次中的重复文本只编码一次。
+    fn get_query_embeddings(
+        &self,
+        inputs: &[&str],
+    ) -> Result<Vec<CachedEmbedding>, PredictiveError> {
+        if inputs.is_empty() {
+            return Err(PredictiveError::Model(GeneralError::EmptySequence));
         }
 
-        let target_vec_t = self
-            .model
-            .get_predict_vector(input)
-            .map_err(PredictiveError::Model)?;
-        let target_vec: Array1<f32> = target_vec_t.row(0).mapv(|x| x.into());
-        let cached = CachedEmbedding::new(target_vec);
-        self.query_cache
-            .lock()
-            .unwrap()
-            .insert(input.to_string(), cached.clone());
-        Ok(cached)
+        let mut resolved = vec![None; inputs.len()];
+        let mut uncached_texts = Vec::<&str>::new();
+        let mut positions_by_text = HashMap::<String, Vec<usize>>::new();
+        {
+            let cache = self.query_cache.lock().unwrap();
+            for (position, input) in inputs.iter().enumerate() {
+                if let Some(cached) = cache.get(input) {
+                    resolved[position] = Some(cached);
+                } else {
+                    let positions = positions_by_text.entry((*input).to_string()).or_default();
+                    if positions.is_empty() {
+                        uncached_texts.push(input);
+                    }
+                    positions.push(position);
+                }
+            }
+        }
+
+        if !uncached_texts.is_empty() {
+            let batch = self
+                .model
+                .get_predict_vectors(&uncached_texts)
+                .map_err(PredictiveError::Model)?;
+            let mut cache = self.query_cache.lock().unwrap();
+            for (batch_index, input) in uncached_texts.iter().enumerate() {
+                let embedding =
+                    CachedEmbedding::new(batch.row(batch_index).mapv(|value| value.into()));
+                cache.insert((*input).to_string(), embedding.clone());
+                if let Some(positions) = positions_by_text.get(*input) {
+                    for &position in positions {
+                        resolved[position] = Some(embedding.clone());
+                    }
+                }
+            }
+        }
+
+        resolved
+            .into_iter()
+            .map(|item| item.ok_or(PredictiveError::Model(GeneralError::EmptySequence)))
+            .collect()
     }
 
     fn get_candidate_embedding(&self, candidate: &str) -> Result<CachedEmbedding, PredictiveError> {

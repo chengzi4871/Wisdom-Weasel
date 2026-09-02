@@ -689,6 +689,52 @@ local function build_breakdown_scores(env, query_variants, candidates, log_scope
 
     local scores = nil
     local successful_variants = 0
+
+    -- 新版原生模块会把全部上下文合并成一次 ONNX 调用。若用户仍在使用旧 DLL，
+    -- 或批量模型不可用，则继续执行下方逐条路径，确保升级过程不中断。
+    if type(env.core.compute_score_breakdowns_batch) == "function" then
+        local query_texts = {}
+        for i = 1, #query_variants do
+            query_texts[i] = query_variants[i].text
+        end
+        local batch_scores, batch_error = env.core.compute_score_breakdowns_batch(query_texts, candidates)
+        if batch_scores and #batch_scores == #query_variants then
+            for i = 1, #query_variants do
+                local variant_scores = batch_scores[i]
+                local variant = query_variants[i]
+                if variant_scores then
+                    successful_variants = successful_variants + 1
+                    if not scores then
+                        scores = {}
+                    end
+                    for j = 1, #variant_scores do
+                        local row = variant_scores[j] or {}
+                        local entry = scores[j] or {
+                            semantic_score = 0.0,
+                            preference_score = 0.0,
+                            user_frequency_score = 0.0,
+                            final_score = 0.0,
+                            dynamic_preference_factor = 0.0,
+                        }
+                        entry.semantic_score = entry.semantic_score + (tonumber(row.semantic_score) or 0.0) * variant.weight
+                        entry.preference_score = entry.preference_score + (tonumber(row.preference_score) or 0.0) * variant.weight
+                        entry.user_frequency_score = entry.user_frequency_score + (tonumber(row.user_frequency_score) or 0.0) * variant.weight
+                        entry.final_score = entry.final_score + (tonumber(row.final_score) or 0.0) * variant.weight
+                        entry.dynamic_preference_factor = entry.dynamic_preference_factor +
+                            (tonumber(row.dynamic_preference_factor) or 0.0) * variant.weight
+                        scores[j] = entry
+                    end
+                end
+            end
+            return scores, successful_variants
+        elseif env.log_enabled then
+            emit_log(env, string.format(
+                "%s batch unavailable, falling back to scalar calls, error=%s",
+                tostring(log_scope or "breakdown"),
+                tostring(batch_error or "incomplete batch result")))
+        end
+    end
+
     for i = 1, #query_variants do
         local variant = query_variants[i]
         local variant_scores = nil
@@ -1562,6 +1608,38 @@ local function build_weighted_similarity_scores(env, query_variants, candidates,
 
     local scores = nil
     local successful_variants = 0
+
+    if type(env.core.compute_similarities_batch) == "function" then
+        local query_texts = {}
+        for i = 1, #query_variants do
+            query_texts[i] = query_variants[i].text
+        end
+        local batch_scores, batch_error = env.core.compute_similarities_batch(query_texts, candidates)
+        if batch_scores and #batch_scores == #query_variants then
+            scores = {}
+            for i = 1, #query_variants do
+                local variant_scores = batch_scores[i]
+                local variant = query_variants[i]
+                if variant_scores then
+                    successful_variants = successful_variants + 1
+                    for j = 1, #variant_scores do
+                        scores[j] = (scores[j] or 0.0) +
+                            (tonumber(variant_scores[j]) or 0.0) * variant.weight
+                    end
+                end
+            end
+            for i = 1, #candidates do
+                scores[i] = tonumber(scores[i]) or 0.0
+            end
+            return scores, successful_variants
+        elseif env.log_enabled then
+            emit_log(env, string.format(
+                "%s batch unavailable, falling back to scalar calls, error=%s",
+                tostring(log_scope or "semantic"),
+                tostring(batch_error or "incomplete batch result")))
+        end
+    end
+
     for i = 1, #query_variants do
         local variant = query_variants[i]
         local variant_scores, err = env.core.compute_similarities(variant.text, candidates)
@@ -2745,6 +2823,8 @@ function M.init(env)
     local config = env.engine.schema.config
     env.enabled = config:get_bool("alpha_rerank/enabled")
     if env.enabled == nil then env.enabled = false end
+    env.prewarm_enabled = config:get_bool("alpha_rerank/prewarm_enabled")
+    if env.prewarm_enabled == nil then env.prewarm_enabled = false end
 
     env.max_candidates = config:get_int("alpha_rerank/max_candidates") or DEFAULT_MAX_CANDIDATES
     env.max_negative_candidates = config:get_int("alpha_rerank/max_negative_candidates") or
@@ -2914,7 +2994,7 @@ function M.init(env)
     })
     if ok then
         env.backend_ready = true
-        if env.engine and env.engine.context and env.engine.context.commit_notifier then
+        if env.prewarm_enabled and env.engine and env.engine.context and env.engine.context.commit_notifier then
             env.commit_notifier = env.engine.context.commit_notifier:connect(function(_)
                 maybe_prewarm_rerank_context(env, "commit")
             end)
@@ -2993,8 +3073,6 @@ function M.func(input, env)
     end
 
     sync_user_preference(env)
-    maybe_prewarm_rerank_context(env, "filter")
-
     local seg = context.composition and context.composition:back() or nil
     if not seg or not tags_match(seg, env) then
         for cand in input:iter() do yield(cand) end

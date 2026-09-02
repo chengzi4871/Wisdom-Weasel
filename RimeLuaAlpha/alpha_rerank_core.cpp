@@ -80,6 +80,22 @@ struct SimilarityBreakdownResult {
   float dynamic_preference_factor;
 };
 
+struct BatchSimilarityResult {
+  int query_index;
+  char* word;
+  float score;
+};
+
+struct BatchSimilarityBreakdownResult {
+  int query_index;
+  char* word;
+  float semantic_score;
+  float preference_score;
+  float user_frequency_score;
+  float final_score;
+  float dynamic_preference_factor;
+};
+
 using AlphaPredictiveHandle = void*;
 using AlphaPredictiveNewFn = AlphaPredictiveHandle(__cdecl*)(const char*);
 using AlphaPredictiveFreeFn = void(__cdecl*)(AlphaPredictiveHandle);
@@ -95,6 +111,20 @@ using AlphaPredictiveComputeBreakdownsOrderedFn = int(__cdecl*)(
     const char* const*,
     int,
     SimilarityBreakdownResult**);
+using AlphaPredictiveComputeBatchOrderedFn = int(__cdecl*)(
+    AlphaPredictiveHandle,
+    const char* const*,
+    int,
+    const char* const*,
+    int,
+    BatchSimilarityResult**);
+using AlphaPredictiveComputeBreakdownsBatchOrderedFn = int(__cdecl*)(
+    AlphaPredictiveHandle,
+    const char* const*,
+    int,
+    const char* const*,
+    int,
+    BatchSimilarityBreakdownResult**);
 using AlphaPredictiveWarmQueryFn =
     int(__cdecl*)(AlphaPredictiveHandle, const char*);
 using AlphaPredictiveApplyFeedbackFn = int(__cdecl*)(
@@ -108,6 +138,10 @@ using AlphaPredictiveFreeResultFn =
     void(__cdecl*)(SimilarityResult*, int);
 using AlphaPredictiveFreeBreakdownResultFn =
     void(__cdecl*)(SimilarityBreakdownResult*, int);
+using AlphaPredictiveFreeBatchResultFn =
+    void(__cdecl*)(BatchSimilarityResult*, int);
+using AlphaPredictiveFreeBatchBreakdownResultFn =
+    void(__cdecl*)(BatchSimilarityBreakdownResult*, int);
 
 struct AlphaLibrary {
   HMODULE module = nullptr;
@@ -115,11 +149,17 @@ struct AlphaLibrary {
   AlphaPredictiveFreeFn destroy = nullptr;
   AlphaPredictiveComputeOrderedFn compute_ordered = nullptr;
   AlphaPredictiveComputeBreakdownsOrderedFn compute_breakdowns_ordered = nullptr;
+  AlphaPredictiveComputeBatchOrderedFn compute_batch_ordered = nullptr;
+  AlphaPredictiveComputeBreakdownsBatchOrderedFn
+      compute_breakdowns_batch_ordered = nullptr;
   AlphaPredictiveWarmQueryFn warm_query = nullptr;
   AlphaPredictiveApplyFeedbackFn apply_feedback = nullptr;
   AlphaPredictiveUpdatePreferenceFn update_preference = nullptr;
   AlphaPredictiveFreeResultFn free_result = nullptr;
   AlphaPredictiveFreeBreakdownResultFn free_breakdown_result = nullptr;
+  AlphaPredictiveFreeBatchResultFn free_batch_result = nullptr;
+  AlphaPredictiveFreeBatchBreakdownResultFn free_batch_breakdown_result =
+      nullptr;
   AlphaPredictiveHandle predictor = nullptr;
   std::wstring module_dir;
   std::wstring library_path;
@@ -213,11 +253,15 @@ void ResetLibraryUnlocked() {
   g_alpha.destroy = nullptr;
   g_alpha.compute_ordered = nullptr;
   g_alpha.compute_breakdowns_ordered = nullptr;
+  g_alpha.compute_batch_ordered = nullptr;
+  g_alpha.compute_breakdowns_batch_ordered = nullptr;
   g_alpha.warm_query = nullptr;
   g_alpha.apply_feedback = nullptr;
   g_alpha.update_preference = nullptr;
   g_alpha.free_result = nullptr;
   g_alpha.free_breakdown_result = nullptr;
+  g_alpha.free_batch_result = nullptr;
+  g_alpha.free_batch_breakdown_result = nullptr;
   g_alpha.library_path.clear();
 }
 
@@ -317,6 +361,15 @@ bool LoadAlphaLibraryUnlocked(const std::wstring& library_path,
       reinterpret_cast<AlphaPredictiveComputeBreakdownsOrderedFn>(
           GetProcAddress(module,
                          "alpha_predictive_compute_score_breakdowns_ordered"));
+  auto compute_batch = reinterpret_cast<AlphaPredictiveComputeBatchOrderedFn>(
+      GetProcAddress(
+          module,
+          "alpha_predictive_compute_similarities_batch_ordered"));
+  auto compute_breakdowns_batch =
+      reinterpret_cast<AlphaPredictiveComputeBreakdownsBatchOrderedFn>(
+          GetProcAddress(
+              module,
+              "alpha_predictive_compute_score_breakdowns_batch_ordered"));
   auto warm_query = reinterpret_cast<AlphaPredictiveWarmQueryFn>(
       GetProcAddress(module, "alpha_predictive_warm_query"));
   auto apply_feedback = reinterpret_cast<AlphaPredictiveApplyFeedbackFn>(
@@ -328,6 +381,14 @@ bool LoadAlphaLibraryUnlocked(const std::wstring& library_path,
   auto free_breakdown_result =
       reinterpret_cast<AlphaPredictiveFreeBreakdownResultFn>(GetProcAddress(
           module, "alpha_predictive_free_similarity_breakdown_result"));
+  auto free_batch_result = reinterpret_cast<AlphaPredictiveFreeBatchResultFn>(
+      GetProcAddress(module,
+                     "alpha_predictive_free_batch_similarities_result"));
+  auto free_batch_breakdown_result =
+      reinterpret_cast<AlphaPredictiveFreeBatchBreakdownResultFn>(
+          GetProcAddress(
+              module,
+              "alpha_predictive_free_batch_similarity_breakdown_result"));
 
   if (!create || !destroy || !compute || !free_result) {
     error =
@@ -341,11 +402,15 @@ bool LoadAlphaLibraryUnlocked(const std::wstring& library_path,
   g_alpha.destroy = destroy;
   g_alpha.compute_ordered = compute;
   g_alpha.compute_breakdowns_ordered = compute_breakdowns;
+  g_alpha.compute_batch_ordered = compute_batch;
+  g_alpha.compute_breakdowns_batch_ordered = compute_breakdowns_batch;
   g_alpha.warm_query = warm_query;
   g_alpha.apply_feedback = apply_feedback;
   g_alpha.update_preference = update_preference;
   g_alpha.free_result = free_result;
   g_alpha.free_breakdown_result = free_breakdown_result;
+  g_alpha.free_batch_result = free_batch_result;
+  g_alpha.free_batch_breakdown_result = free_batch_breakdown_result;
   g_alpha.library_path = library_path;
   return true;
 }
@@ -584,6 +649,185 @@ int LuaComputeScoreBreakdowns(lua_State* L) {
   return 1;
 }
 
+// Lua 侧传入“多个上下文 + 同一组候选”，返回二维分数表。这样可以让
+// alpha_input.dll 将查询合并到一次 ONNX 推理中；旧 DLL 没有该导出时，Lua
+// 会自动改用原有逐条接口。
+int LuaComputeSimilaritiesBatch(lua_State* L) {
+  const std::vector<std::string> inputs = LuaCheckStringArray(L, 1);
+  const std::vector<std::string> candidates = LuaCheckStringArray(L, 2);
+  if (inputs.empty() || candidates.empty()) {
+    lua_newtable(L);
+    return 1;
+  }
+
+  std::vector<const char*> input_ptrs;
+  input_ptrs.reserve(inputs.size());
+  for (const auto& input : inputs) input_ptrs.push_back(input.c_str());
+  std::vector<const char*> candidate_ptrs;
+  candidate_ptrs.reserve(candidates.size());
+  for (const auto& candidate : candidates) {
+    candidate_ptrs.push_back(candidate.c_str());
+  }
+
+  BatchSimilarityResult* results = nullptr;
+  int result_len = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_alpha_mutex);
+    if (!g_alpha.predictor || !g_alpha.compute_batch_ordered ||
+        !g_alpha.free_batch_result) {
+      return PushNilError(L, "alpha_input batch similarity APIs unavailable");
+    }
+    result_len = g_alpha.compute_batch_ordered(
+        g_alpha.predictor, input_ptrs.data(),
+        static_cast<int>(input_ptrs.size()), candidate_ptrs.data(),
+        static_cast<int>(candidate_ptrs.size()), &results);
+  }
+  if (result_len < 0 || !results) {
+    return PushNilError(L, "alpha_input batched similarity computation failed");
+  }
+
+  std::vector<std::vector<lua_Number>> scores(
+      inputs.size(), std::vector<lua_Number>(candidates.size(), 0.0));
+  std::vector<std::vector<bool>> assigned(
+      inputs.size(), std::vector<bool>(candidates.size(), false));
+  for (int i = 0; i < result_len; ++i) {
+    const int query_index = results[i].query_index;
+    if (query_index < 0 || static_cast<size_t>(query_index) >= inputs.size()) {
+      continue;
+    }
+    const std::string result_word =
+        results[i].word ? std::string(results[i].word) : std::string();
+    for (size_t candidate_index = 0; candidate_index < candidates.size();
+         ++candidate_index) {
+      if (!assigned[query_index][candidate_index] &&
+          candidates[candidate_index] == result_word) {
+        scores[query_index][candidate_index] =
+            static_cast<lua_Number>(results[i].score);
+        assigned[query_index][candidate_index] = true;
+        break;
+      }
+    }
+  }
+
+  lua_createtable(L, static_cast<int>(inputs.size()), 0);
+  const int outer_index = lua_gettop(L);
+  for (size_t query_index = 0; query_index < inputs.size(); ++query_index) {
+    lua_createtable(L, static_cast<int>(candidates.size()), 0);
+    const int row_index = lua_gettop(L);
+    for (size_t candidate_index = 0; candidate_index < candidates.size();
+         ++candidate_index) {
+      lua_pushnumber(L, scores[query_index][candidate_index]);
+      lua_seti(L, row_index, static_cast<lua_Integer>(candidate_index + 1));
+    }
+    lua_seti(L, outer_index, static_cast<lua_Integer>(query_index + 1));
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(g_alpha_mutex);
+    g_alpha.free_batch_result(results, result_len);
+  }
+  return 1;
+}
+
+int LuaComputeScoreBreakdownsBatch(lua_State* L) {
+  const std::vector<std::string> inputs = LuaCheckStringArray(L, 1);
+  const std::vector<std::string> candidates = LuaCheckStringArray(L, 2);
+  if (inputs.empty() || candidates.empty()) {
+    lua_newtable(L);
+    return 1;
+  }
+
+  std::vector<const char*> input_ptrs;
+  input_ptrs.reserve(inputs.size());
+  for (const auto& input : inputs) input_ptrs.push_back(input.c_str());
+  std::vector<const char*> candidate_ptrs;
+  candidate_ptrs.reserve(candidates.size());
+  for (const auto& candidate : candidates) {
+    candidate_ptrs.push_back(candidate.c_str());
+  }
+
+  BatchSimilarityBreakdownResult* results = nullptr;
+  int result_len = 0;
+  {
+    std::lock_guard<std::mutex> lock(g_alpha_mutex);
+    if (!g_alpha.predictor || !g_alpha.compute_breakdowns_batch_ordered ||
+        !g_alpha.free_batch_breakdown_result) {
+      return PushNilError(L, "alpha_input batch breakdown APIs unavailable");
+    }
+    result_len = g_alpha.compute_breakdowns_batch_ordered(
+        g_alpha.predictor, input_ptrs.data(),
+        static_cast<int>(input_ptrs.size()), candidate_ptrs.data(),
+        static_cast<int>(candidate_ptrs.size()), &results);
+  }
+  if (result_len < 0 || !results) {
+    return PushNilError(L, "alpha_input batched breakdown computation failed");
+  }
+
+  struct BreakdownValue {
+    lua_Number semantic_score = 0.0;
+    lua_Number preference_score = 0.0;
+    lua_Number user_frequency_score = 0.0;
+    lua_Number final_score = 0.0;
+    lua_Number dynamic_preference_factor = 0.0;
+    bool assigned = false;
+  };
+  std::vector<std::vector<BreakdownValue>> scores(
+      inputs.size(), std::vector<BreakdownValue>(candidates.size()));
+  for (int i = 0; i < result_len; ++i) {
+    const int query_index = results[i].query_index;
+    if (query_index < 0 || static_cast<size_t>(query_index) >= inputs.size()) {
+      continue;
+    }
+    const std::string result_word =
+        results[i].word ? std::string(results[i].word) : std::string();
+    for (size_t candidate_index = 0; candidate_index < candidates.size();
+         ++candidate_index) {
+      auto& value = scores[query_index][candidate_index];
+      if (value.assigned || candidates[candidate_index] != result_word) {
+        continue;
+      }
+      value.semantic_score = results[i].semantic_score;
+      value.preference_score = results[i].preference_score;
+      value.user_frequency_score = results[i].user_frequency_score;
+      value.final_score = results[i].final_score;
+      value.dynamic_preference_factor = results[i].dynamic_preference_factor;
+      value.assigned = true;
+      break;
+    }
+  }
+
+  lua_createtable(L, static_cast<int>(inputs.size()), 0);
+  const int outer_index = lua_gettop(L);
+  for (size_t query_index = 0; query_index < inputs.size(); ++query_index) {
+    lua_createtable(L, static_cast<int>(candidates.size()), 0);
+    const int row_index = lua_gettop(L);
+    for (size_t candidate_index = 0; candidate_index < candidates.size();
+         ++candidate_index) {
+      const auto& value = scores[query_index][candidate_index];
+      lua_newtable(L);
+      const int item_index = lua_gettop(L);
+      lua_pushnumber(L, value.semantic_score);
+      lua_setfield(L, item_index, "semantic_score");
+      lua_pushnumber(L, value.preference_score);
+      lua_setfield(L, item_index, "preference_score");
+      lua_pushnumber(L, value.user_frequency_score);
+      lua_setfield(L, item_index, "user_frequency_score");
+      lua_pushnumber(L, value.final_score);
+      lua_setfield(L, item_index, "final_score");
+      lua_pushnumber(L, value.dynamic_preference_factor);
+      lua_setfield(L, item_index, "dynamic_preference_factor");
+      lua_seti(L, row_index, static_cast<lua_Integer>(candidate_index + 1));
+    }
+    lua_seti(L, outer_index, static_cast<lua_Integer>(query_index + 1));
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(g_alpha_mutex);
+    g_alpha.free_batch_breakdown_result(results, result_len);
+  }
+  return 1;
+}
+
 int LuaWarmQuery(lua_State* L) {
   const std::string input = LuaCheckString(L, 1);
   if (input.empty()) {
@@ -693,6 +937,8 @@ const luaL_Reg kModuleFunctions[] = {
     {"is_ready", LuaIsReady},
     {"compute_similarities", LuaComputeSimilarities},
     {"compute_score_breakdowns", LuaComputeScoreBreakdowns},
+    {"compute_similarities_batch", LuaComputeSimilaritiesBatch},
+    {"compute_score_breakdowns_batch", LuaComputeScoreBreakdownsBatch},
     {"warm_query", LuaWarmQuery},
     {"apply_user_feedback", LuaApplyUserFeedback},
     {"update_user_preference", LuaUpdateUserPreference},

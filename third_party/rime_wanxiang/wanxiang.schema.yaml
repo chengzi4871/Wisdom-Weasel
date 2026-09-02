@@ -144,6 +144,7 @@ alpha_rerank:
   order_prior_weight: 0.03
   input_coverage_weight: 0.05
   preserve_first_min_chars: 0
+  prewarm_enabled: false
   log_enabled: false
   log_path: ""
   prefer_sentence_boundary: true
