@@ -434,15 +434,23 @@ patch:
   "llm/openai/api_url": "http://127.0.0.1:11434/v1/chat/completions"
   "llm/openai/api_key": ""
   "llm/openai/model": "<安装时选择的 Ollama 模型>"
-  "llm/openai/max_tokens": 20
-  "llm/openai/temperature": "0.6"
+  "llm/openai/max_tokens": 32
+  "llm/openai/temperature": "0.3"
+  "llm/openai/top_p": "0.9"
+  "llm/openai/presence_penalty": "0.0"
+  "llm/openai/frequency_penalty": "0.0"
+  "llm/ollama/num_ctx": 1024
+  "llm/ollama/num_predict": 32
+  "llm/ollama/top_k": 20
+  "llm/ollama/repeat_penalty": "1.0"
+  "llm/ollama/keep_alive": "30m"
 ```
 
 说明：
 
-- `provider_type` 仍然是 `openai`
-- 这是因为 Wisdom-Weasel 直接把 **Ollama 当作 OpenAI-compatible API** 来调用
-- 当前默认通过 `http://127.0.0.1:11434/v1/chat/completions` 调用本地 Ollama 模型
+- `provider_type` 保持 `openai`，便于同一提供者兼容远程 OpenAI 风格服务
+- 检测到本机 Ollama 的无输入预测时，程序会自动改用原生 `/api/chat`：一次请求生成全部候选、应用模型聊天模板，并在候选足量后提前结束流
+- `num_ctx` 只需覆盖输入法的短上下文；`keep_alive` 让模型驻留显存，避免反复冷启动
 
 ### Alpha 重排补丁
 

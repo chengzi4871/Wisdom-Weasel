@@ -540,9 +540,9 @@ std::string ExtractContentFromSseResponse(const std::string& sse_response) {
   return aggregated_content;
 }
 
-bool ExtractResponseFromOllamaGenerateChunkPayload(const std::string& payload,
-                                                   std::string& delta_content,
-                                                   bool& finished) {
+bool ExtractContentFromOllamaChatChunkPayload(const std::string& payload,
+                                              std::string& delta_content,
+                                              bool& finished) {
   delta_content.clear();
   finished = false;
 
@@ -550,8 +550,18 @@ bool ExtractResponseFromOllamaGenerateChunkPayload(const std::string& payload,
     boost::property_tree::ptree root;
     std::istringstream json_stream(payload);
     boost::property_tree::read_json(json_stream, root);
-    if (const auto response = root.get_optional<std::string>("response")) {
-      delta_content = *response;
+    // Ollama /api/chat 的流式响应把增量文本放在 message.content 中。
+    // 保留 response 兼容读取，便于服务端代理返回 /api/generate 风格数据时
+    // 仍可正常工作。
+    if (const auto message = root.get_child_optional("message")) {
+      if (const auto content = message->get_optional<std::string>("content")) {
+        delta_content = *content;
+      }
+    }
+    if (delta_content.empty()) {
+      if (const auto response = root.get_optional<std::string>("response")) {
+        delta_content = *response;
+      }
     }
     if (const auto done = root.get_optional<bool>("done")) {
       finished = *done;
@@ -563,9 +573,9 @@ bool ExtractResponseFromOllamaGenerateChunkPayload(const std::string& payload,
   return finished || !delta_content.empty();
 }
 
-std::string ExtractContentFromOllamaGenerateResponse(
-    const std::string& generate_response) {
-  std::stringstream input(generate_response);
+std::string ExtractContentFromOllamaChatResponse(
+    const std::string& chat_response) {
+  std::stringstream input(chat_response);
   std::string line;
   std::string aggregated_content;
 
@@ -578,8 +588,8 @@ std::string ExtractContentFromOllamaGenerateResponse(
     }
     std::string delta_content;
     bool finished = false;
-    if (ExtractResponseFromOllamaGenerateChunkPayload(line, delta_content,
-                                                      finished)) {
+    if (ExtractContentFromOllamaChatChunkPayload(line, delta_content,
+                                                 finished)) {
       aggregated_content += delta_content;
       if (finished) {
         break;
@@ -588,112 +598,6 @@ std::string ExtractContentFromOllamaGenerateResponse(
   }
 
   return aggregated_content;
-}
-
-std::wstring TrimLeadingWhitespaceAndPunctuation(std::wstring text) {
-  while (!text.empty() && std::iswspace(text.front())) {
-    text.erase(text.begin());
-  }
-  if (LooksLikeExpressiveToken(text)) {
-    return text;
-  }
-  while (!text.empty() && IsCandidateWrapperChar(text.front())) {
-    text.erase(text.begin());
-  }
-  while (!text.empty() && std::iswspace(text.back())) {
-    text.pop_back();
-  }
-  return text;
-}
-
-std::wstring RemovePromptEcho(const std::wstring& prompt,
-                              std::wstring generated) {
-  if (generated.empty()) {
-    return generated;
-  }
-
-  size_t start = 0;
-  while (start < generated.size() && std::iswspace(generated[start])) {
-    ++start;
-  }
-
-  size_t overlap = 0;
-  const size_t max_overlap =
-      (std::min)(prompt.size(), generated.size() - start);
-  for (size_t len = max_overlap; len > 0; --len) {
-    if (prompt.compare(prompt.size() - len, len, generated, start, len) == 0) {
-      overlap = len;
-      break;
-    }
-  }
-
-  generated.erase(0, start + overlap);
-  return TrimLeadingWhitespaceAndPunctuation(generated);
-}
-
-std::vector<std::wstring> BuildContinuationCandidates(
-    const std::wstring& prompt,
-    const std::wstring& generated,
-    size_t max_candidates,
-    bool allow_expressive_tokens = false) {
-  std::vector<std::wstring> candidates;
-  std::wstring continuation = RemovePromptEcho(prompt, generated);
-  if (continuation.empty()) {
-    return candidates;
-  }
-
-  size_t clause_end = continuation.find_first_of(L"\r\n。！？!?；;，,、");
-  if (clause_end != std::wstring::npos && clause_end > 0) {
-    continuation = continuation.substr(0, clause_end);
-  }
-  continuation = TrimLeadingWhitespaceAndPunctuation(continuation);
-  if (continuation.empty()) {
-    return candidates;
-  }
-
-  static const size_t kMaxVisibleCandidateLen = 16u;
-  static const size_t kPreferredLengths[] = {2, 3, 4, 5, 6, 8, 12, 16};
-  const size_t visible_len = (std::min)(continuation.size(), kMaxVisibleCandidateLen);
-  for (size_t preferred_len : kPreferredLengths) {
-    if (preferred_len > visible_len) {
-      continue;
-    }
-    std::wstring candidate = continuation.substr(0, preferred_len);
-    if (allow_expressive_tokens) {
-      candidate = NormalizeExpressiveCandidateToken(candidate);
-    }
-    if (candidate.empty()) {
-      candidate = NormalizeCandidateToken(continuation.substr(0, preferred_len));
-    }
-    if (IsIgnorableCandidateToken(candidate)) {
-      continue;
-    }
-    if (std::find(candidates.begin(), candidates.end(), candidate) ==
-        candidates.end()) {
-      candidates.push_back(candidate);
-    }
-    if (max_candidates > 0 && candidates.size() >= max_candidates) {
-      return candidates;
-    }
-  }
-
-  std::wstring full_candidate = continuation.substr(0, visible_len);
-  if (allow_expressive_tokens) {
-    full_candidate = NormalizeExpressiveCandidateToken(full_candidate);
-  }
-  if (full_candidate.empty()) {
-    full_candidate = NormalizeCandidateToken(continuation.substr(0, visible_len));
-  }
-  if (!IsIgnorableCandidateToken(full_candidate) &&
-      std::find(candidates.begin(), candidates.end(), full_candidate) ==
-          candidates.end()) {
-    candidates.push_back(full_candidate);
-  }
-
-  if (max_candidates > 0 && candidates.size() > max_candidates) {
-    candidates.resize(max_candidates);
-  }
-  return candidates;
 }
 
 std::wstring BuildNoInputShortCandidateDiversityKey(
@@ -767,56 +671,6 @@ std::vector<std::wstring> ReorderCandidatesForNoInputDiversity(
     reordered.resize(max_candidates);
   }
   return reordered;
-}
-
-std::vector<std::wstring> BuildSingleContinuationCandidates(
-    const std::wstring& prompt,
-    const std::wstring& generated,
-    size_t max_candidates,
-    size_t max_len,
-    const wchar_t* stop_chars,
-    bool allow_expressive_tokens = false) {
-  std::vector<std::wstring> candidates;
-  std::wstring continuation = RemovePromptEcho(prompt, generated);
-  if (continuation.empty()) {
-    return candidates;
-  }
-
-  size_t clause_end = continuation.find_first_of(stop_chars);
-  if (clause_end != std::wstring::npos && clause_end > 0) {
-    continuation = continuation.substr(0, clause_end);
-  }
-  continuation = TrimLeadingWhitespaceAndPunctuation(continuation);
-  if (continuation.empty()) {
-    return candidates;
-  }
-
-  const size_t visible_len = (std::min)(continuation.size(), max_len);
-  std::wstring candidate;
-  if (allow_expressive_tokens) {
-    candidate =
-        NormalizeExpressiveCandidateToken(continuation.substr(0, visible_len));
-  }
-  if (candidate.empty()) {
-    candidate = NormalizeCandidateToken(continuation.substr(0, visible_len));
-  }
-  if (!IsIgnorableCandidateToken(candidate)) {
-    candidates.push_back(candidate);
-  }
-  if (max_candidates > 0 && candidates.size() > max_candidates) {
-    candidates.resize(max_candidates);
-  }
-  return candidates;
-}
-
-std::vector<std::wstring> BuildSentenceContinuationCandidates(
-    const std::wstring& prompt,
-    const std::wstring& generated,
-    size_t max_candidates) {
-  static constexpr size_t kMaxSentenceContinuationLen = 24u;
-  return BuildSingleContinuationCandidates(prompt, generated, max_candidates,
-                                           kMaxSentenceContinuationLen,
-                                           L"\r\n。！？!?；;");
 }
 
 bool LooksLikeLongPinyinInput(const std::wstring& text) {
@@ -1193,6 +1047,11 @@ OpenAICompatibleProvider::OpenAICompatibleProvider()
       m_frequency_penalty(0.0),
       m_has_seed(false),
       m_seed(0),
+      m_ollama_num_ctx(1024),
+      m_ollama_num_predict(32),
+      m_ollama_top_k(20),
+      m_ollama_repeat_penalty(1.0),
+      m_ollama_keep_alive("30m"),
       m_extra_body_json(""),
       m_hSession(nullptr),
       m_hConnect(nullptr) {}
@@ -1488,6 +1347,46 @@ bool OpenAICompatibleProvider::LoadConfig(const std::string& config_name) {
     m_has_seed = false;
   }
 
+  // Ollama 的输入法预测使用短上下文、短输出和模型常驻。参数独立放在
+  // llm/ollama 下，避免改变远程 OpenAI 兼容服务的请求语义。
+  int ollama_num_ctx = 1024;
+  if (rime_api->config_get_int(&config, "llm/ollama/num_ctx",
+                               &ollama_num_ctx)) {
+    m_ollama_num_ctx = (std::max)(256, (std::min)(ollama_num_ctx, 32768));
+  } else {
+    m_ollama_num_ctx = 1024;
+  }
+
+  int ollama_num_predict = 32;
+  if (rime_api->config_get_int(&config, "llm/ollama/num_predict",
+                               &ollama_num_predict)) {
+    m_ollama_num_predict =
+        (std::max)(8, (std::min)(ollama_num_predict, 128));
+  } else {
+    m_ollama_num_predict = 32;
+  }
+
+  int ollama_top_k = 20;
+  if (rime_api->config_get_int(&config, "llm/ollama/top_k", &ollama_top_k)) {
+    m_ollama_top_k = (std::max)(1, (std::min)(ollama_top_k, 100));
+  } else {
+    m_ollama_top_k = 20;
+  }
+
+  if (rime_api->config_get_string(&config, "llm/ollama/repeat_penalty",
+                                  temp_str, sizeof(temp_str) - 1)) {
+    m_ollama_repeat_penalty = atof(temp_str);
+  } else {
+    m_ollama_repeat_penalty = 1.0;
+  }
+
+  if (rime_api->config_get_string(&config, "llm/ollama/keep_alive", buffer,
+                                  BUF_SIZE)) {
+    m_ollama_keep_alive = buffer;
+  } else {
+    m_ollama_keep_alive = "30m";
+  }
+
   if (g_dev_console && g_dev_console->IsEnabled()) {
     g_dev_console->WriteLine(L"[LLM] LoadConfig: top_p = " +
                              std::to_wstring(m_top_p));
@@ -1498,6 +1397,13 @@ bool OpenAICompatibleProvider::LoadConfig(const std::string& config_name) {
     g_dev_console->WriteLine(
         L"[LLM] LoadConfig: seed = " +
         std::wstring(m_has_seed ? std::to_wstring(m_seed) : L"(未设置)"));
+    g_dev_console->WriteLine(
+        L"[LLM] LoadConfig: Ollama num_ctx = " +
+        std::to_wstring(m_ollama_num_ctx) + L", num_predict = " +
+        std::to_wstring(m_ollama_num_predict) + L", top_k = " +
+        std::to_wstring(m_ollama_top_k) + L", repeat_penalty = " +
+        std::to_wstring(m_ollama_repeat_penalty) + L", keep_alive = " +
+        u8tow(m_ollama_keep_alive));
   }
 
   // 任意 JSON 透传（必须是 JSON 对象字符串，如 {"stream":false,"user":"abc"}）
@@ -1536,149 +1442,93 @@ std::vector<std::wstring> OpenAICompatibleProvider::ExecuteRequest(
       m_api_url.find("127.0.0.1:11434") != std::string::npos ||
       m_api_url.find("localhost:11434") != std::string::npos;
   if (is_local_ollama && request.type == LLMRequestType::NoInputPrediction) {
-    const std::string prompt_utf8 = wtou8(request.context);
-    const std::string generate_url =
-        m_api_url.find("/v1/chat/completions") != std::string::npos
-            ? m_api_url.substr(0, m_api_url.find("/v1/chat/completions")) +
-                  "/api/generate"
-            : "http://127.0.0.1:11434/api/generate";
-    const double low_temperature =
-        (std::max)(0.08, (std::min)(m_temperature, 0.22));
-    const double high_temperature =
-        (std::min)(1.0, (std::max)(m_temperature, 0.82));
+    // 输入法需要的是“一次得到多条可选续写”，不是把同一个模型连续调用五
+    // 次。使用 Ollama 原生 /api/chat 可正确应用模型模板，并在一次前向生成
+    // 中返回全部候选；相比旧的 raw /api/generate 多分支方案可显著减少首轮
+    // 预填充、HTTP 往返及重复解码。
+    const size_t authority_start = m_api_url.find("://");
+    const size_t path_start =
+        authority_start == std::string::npos
+            ? std::string::npos
+            : m_api_url.find('/', authority_start + 3);
+    const std::string ollama_origin =
+        path_start == std::string::npos ? m_api_url
+                                        : m_api_url.substr(0, path_start);
+    const std::string chat_url = ollama_origin + "/api/chat";
+    const std::wstring system_prompt =
+        L"你是中文输入法的下一词预测器。预测能直接接在用户文本后面的候选，"
+        L"拼接后必须语法通顺。每行只输出一个候选，不要编号、解释或前后缀。"
+        L"前3项必须是2至4个汉字，其余项不超过12个汉字；各项开头两个汉字尽量"
+        L"不同，并按自然程度排序。情绪场景的最后一项可用 emoji。严格输出 " +
+        std::to_wstring(request.max_candidates) + L" 个候选。";
+    const std::wstring user_prompt = L"已输入文本：" + request.context;
 
-    struct OllamaContinuationBranchSpec {
-      const wchar_t* label;
-      double temperature;
-      int num_predict;
-      size_t max_candidate_chars;
-      const wchar_t* stop_chars;
-      bool allow_stream_partial;
-      size_t partial_visible_limit;
-    };
-
-    const std::vector<OllamaContinuationBranchSpec> branch_specs = {
-        {L"首候选", low_temperature, 8, 8, L"\r\n。！？!?；;，,、 ", true, 1},
-        {L"高多样短词", high_temperature, 8, 3, L"\r\n。！？!?；;，,、 ", false,
-         2},
-        {L"高多样短语", (std::min)(1.0, high_temperature + 0.08), 12, 4,
-         L"\r\n。！？!?；;，,、 ", false, 2},
-        {L"补充短语", (low_temperature + high_temperature) / 2.0, 20, 8,
-         L"\r\n。！？!?；;，,、", false, 2},
-        {L"补充长句", high_temperature, 48, 24, L"\r\n。！？!?；;", false, 3},
-    };
-
-    auto build_generate_body = [&](double temperature, int num_predict) {
-      std::ostringstream json;
-      json << "{"
-           << "\"model\":\"" << weasel::config_json::EscapeJsonString(m_model)
-           << "\","
-           << "\"prompt\":\""
-           << weasel::config_json::EscapeJsonString(prompt_utf8) << "\","
-           << "\"stream\":true,"
-           << "\"raw\":true,"
-           << "\"think\":false,"
-           << "\"options\":{"
-           << "\"temperature\":" << temperature << ","
-           << "\"num_predict\":" << num_predict << "}"
-           << "}";
-      return json.str();
-    };
+    std::ostringstream json;
+    json << "{"
+         << "\"model\":\"" << weasel::config_json::EscapeJsonString(m_model)
+         << "\","
+         << "\"messages\":["
+         << "{\"role\":\"system\",\"content\":\""
+         << weasel::config_json::EscapeJsonString(wtou8(system_prompt))
+         << "\"},"
+         << "{\"role\":\"user\",\"content\":\""
+         << weasel::config_json::EscapeJsonString(wtou8(user_prompt))
+         << "\"}],"
+         << "\"stream\":true,"
+         << "\"think\":false,"
+         << "\"keep_alive\":\""
+         << weasel::config_json::EscapeJsonString(m_ollama_keep_alive) << "\","
+         << "\"options\":{"
+         << "\"num_ctx\":" << m_ollama_num_ctx << ","
+         << "\"num_predict\":" << m_ollama_num_predict << ","
+         << "\"temperature\":" << m_temperature << ","
+         << "\"top_k\":" << m_ollama_top_k << ","
+         << "\"top_p\":" << m_top_p << ","
+         << "\"repeat_penalty\":" << m_ollama_repeat_penalty << ","
+         << "\"presence_penalty\":" << m_presence_penalty << ","
+         << "\"frequency_penalty\":" << m_frequency_penalty << "}"
+         << "}";
+    const std::string request_body = json.str();
 
     extern DevConsole* g_dev_console;
     if (g_dev_console && g_dev_console->IsEnabled()) {
-      g_dev_console->WriteLine(
-          L"[LLM] 发送请求（Ollama Generate / continuation）");
+      g_dev_console->WriteLine(L"[LLM] 发送单次多候选请求（Ollama Chat）");
       g_dev_console->WriteLine(L"  请求类型: " +
                                llm_request::GetRequestTypeName(request.type));
       g_dev_console->WriteLine(L"  原始上下文: " + request.context);
-      g_dev_console->WriteLine(L"  请求URL: " + u8tow(generate_url));
-      for (const auto& branch : branch_specs) {
-        std::wstringstream ss;
-        ss << L"  " << branch.label << L": temperature=" << branch.temperature
-           << L", num_predict=" << branch.num_predict
-           << L", max_candidate_chars=" << branch.max_candidate_chars
-           << L", stream_partial="
-           << (branch.allow_stream_partial ? L"true" : L"false");
-        g_dev_console->WriteLine(ss.str());
-      }
+      g_dev_console->WriteLine(L"  请求URL: " + u8tow(chat_url));
+      g_dev_console->WriteLine(
+          L"  参数: num_ctx=" + std::to_wstring(m_ollama_num_ctx) +
+          L", num_predict=" + std::to_wstring(m_ollama_num_predict) +
+          L", temperature=" + std::to_wstring(m_temperature) +
+          L", top_k=" + std::to_wstring(m_ollama_top_k) +
+          L", top_p=" + std::to_wstring(m_top_p) + L", keep_alive=" +
+          u8tow(m_ollama_keep_alive));
     }
 
-    auto merge_candidate_set = [&](const std::vector<std::wstring>& incoming) {
-      bool changed = false;
-      for (const auto& candidate : incoming) {
-        if (candidate.empty()) {
-          continue;
-        }
-        if (std::find(candidates.begin(), candidates.end(), candidate) !=
-            candidates.end()) {
-          continue;
-        }
-        candidates.push_back(candidate);
-        changed = true;
-      }
-      return changed;
-    };
-
-    auto publish_candidates = [&]() {
-      if (!on_partial || candidates.empty()) {
-        return true;
-      }
-      std::vector<std::wstring> visible_candidates =
-          ReorderCandidatesForNoInputDiversity(candidates, request.max_candidates);
-      if (request.max_candidates > 0 &&
-          visible_candidates.size() > request.max_candidates) {
-        visible_candidates.resize(request.max_candidates);
-      }
-      return on_partial(visible_candidates);
-    };
-
-    for (size_t branch_index = 0; branch_index < branch_specs.size();
-         ++branch_index) {
-      const auto& branch = branch_specs[branch_index];
-      const std::string branch_body =
-          build_generate_body(branch.temperature, branch.num_predict);
-      std::string branch_response_body;
-      LLMPartialCallback branch_partial_callback;
-      if (branch.allow_stream_partial && on_partial) {
-        branch_partial_callback =
-            [on_partial](const std::vector<std::wstring>& partial_candidates) {
-              return on_partial(partial_candidates);
-            };
-      }
-      if (!ExecuteOllamaGenerateRequest(generate_url, branch_body, prompt_utf8,
-                                        branch.partial_visible_limit,
-                                        branch_partial_callback,
-                                        branch_response_body)) {
-        continue;
-      }
-
-      const std::wstring generated =
-          u8tow(ExtractContentFromOllamaGenerateResponse(branch_response_body));
-      const size_t candidate_count_before = candidates.size();
-      merge_candidate_set(BuildSingleContinuationCandidates(
-          request.context, generated, 1, branch.max_candidate_chars,
-          branch.stop_chars, true));
-      if (candidates.size() > candidate_count_before &&
-          !publish_candidates()) {
-        break;
-      }
-      if (request.max_candidates > 0 &&
-          candidates.size() >= request.max_candidates) {
-        break;
-      }
+    std::string response_body;
+    if (!ExecuteOllamaChatRequest(
+            chat_url, request_body, request.type, request.max_candidates,
+            on_partial, request.is_cancelled, response_body)) {
+      return candidates;
+    }
+    if (request.is_cancelled && request.is_cancelled()) {
+      return candidates;
     }
 
-    if (g_dev_console && g_dev_console->IsEnabled()) {
-      std::wstringstream ss;
-      ss << L"[LLM] continuation 多分支合并后候选数: " << candidates.size();
-      g_dev_console->WriteLine(ss.str());
-    }
+    candidates = ExtractCandidatesFromUtf8Text(
+        ExtractContentFromOllamaChatResponse(response_body),
+        request.max_candidates, true);
     candidates =
         ReorderCandidatesForNoInputDiversity(candidates, request.max_candidates);
     if (request.max_candidates > 0 &&
         candidates.size() > request.max_candidates) {
       candidates.resize(request.max_candidates);
+    }
+    if (g_dev_console && g_dev_console->IsEnabled()) {
+      g_dev_console->WriteLine(
+          L"[LLM] Ollama 单次请求候选数: " +
+          std::to_wstring(candidates.size()));
     }
     return candidates;
   }
@@ -2011,12 +1861,13 @@ bool OpenAICompatibleProvider::ExecuteHttpRequest(
   return !response_body.empty();
 }
 
-bool OpenAICompatibleProvider::ExecuteOllamaGenerateRequest(
+bool OpenAICompatibleProvider::ExecuteOllamaChatRequest(
     const std::string& url,
     const std::string& request_body,
-    const std::string& prompt_prefix_utf8,
+    LLMRequestType request_type,
     size_t max_candidates,
     const LLMPartialCallback& on_partial,
+    const std::function<bool()>& is_cancelled,
     std::string& response_body) {
   URL_COMPONENTS url_comp = {0};
   url_comp.dwStructSize = sizeof(URL_COMPONENTS);
@@ -2072,20 +1923,41 @@ bool OpenAICompatibleProvider::ExecuteOllamaGenerateRequest(
     return false;
   }
 
+  auto close_all = [&]() {
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+  };
+  auto cancelled = [&]() {
+    return is_cancelled && is_cancelled();
+  };
+
+  if (cancelled()) {
+    close_all();
+    return false;
+  }
+
   const std::wstring headers = L"Content-Type: application/json\r\n";
   if (!WinHttpSendRequest(
           hRequest, headers.c_str(), (DWORD)-1, (LPVOID)request_body.c_str(),
           (DWORD)request_body.length(), (DWORD)request_body.length(), 0)) {
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
+    close_all();
     return false;
   }
 
   if (!WinHttpReceiveResponse(hRequest, NULL)) {
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
+    close_all();
+    return false;
+  }
+
+  DWORD status_code = 0;
+  DWORD status_code_size = sizeof(status_code);
+  if (!WinHttpQueryHeaders(
+          hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+          WINHTTP_HEADER_NAME_BY_INDEX, &status_code, &status_code_size,
+          WINHTTP_NO_HEADER_INDEX) ||
+      status_code < 200 || status_code >= 300) {
+    close_all();
     return false;
   }
 
@@ -2094,15 +1966,19 @@ bool OpenAICompatibleProvider::ExecuteOllamaGenerateRequest(
   std::string line_buffer;
   std::string aggregated_content;
   std::vector<std::wstring> last_partial_candidates;
-  const std::wstring prompt_prefix = u8tow(prompt_prefix_utf8);
 
-  while (WinHttpQueryDataAvailable(hRequest, &bytes_available) &&
+  while (!cancelled() &&
+         WinHttpQueryDataAvailable(hRequest, &bytes_available) &&
          bytes_available > 0) {
     std::vector<char> buffer(bytes_available);
     DWORD bytes_read = 0;
     if (!WinHttpReadData(hRequest, buffer.data(), bytes_available,
                          &bytes_read)) {
       break;
+    }
+    if (cancelled()) {
+      close_all();
+      return false;
     }
     response_body.append(buffer.data(), bytes_read);
     line_buffer.append(buffer.data(), bytes_read);
@@ -2120,42 +1996,51 @@ bool OpenAICompatibleProvider::ExecuteOllamaGenerateRequest(
 
       std::string delta_content;
       bool finished = false;
-      if (!ExtractResponseFromOllamaGenerateChunkPayload(line, delta_content,
-                                                         finished)) {
+      if (!ExtractContentFromOllamaChatChunkPayload(line, delta_content,
+                                                    finished)) {
         continue;
       }
       if (!delta_content.empty()) {
         aggregated_content += delta_content;
-        if (on_partial) {
-          std::vector<std::wstring> partial_candidates =
-              BuildContinuationCandidates(
-                  prompt_prefix, u8tow(aggregated_content), max_candidates,
-                  true);
-          if (!partial_candidates.empty() &&
-              partial_candidates != last_partial_candidates) {
-            last_partial_candidates = partial_candidates;
-            if (!on_partial(partial_candidates)) {
-              WinHttpCloseHandle(hRequest);
-              WinHttpCloseHandle(hConnect);
-              WinHttpCloseHandle(hSession);
-              return !response_body.empty();
-            }
+        std::vector<std::wstring> partial_candidates =
+            ExtractCandidatesFromUtf8Text(
+                aggregated_content, max_candidates,
+                request_type == LLMRequestType::NoInputPrediction);
+        if (request_type == LLMRequestType::NoInputPrediction) {
+          partial_candidates = ReorderCandidatesForNoInputDiversity(
+              partial_candidates, max_candidates);
+        }
+        if (!partial_candidates.empty() &&
+            partial_candidates != last_partial_candidates) {
+          last_partial_candidates = partial_candidates;
+          if (on_partial && !on_partial(partial_candidates)) {
+            close_all();
+            return false;
           }
+        }
+
+        // 模型已经输出足量候选且以空白结束时，最后一个候选边界已经明确。
+        // 此时主动关闭流可省掉解释性尾巴或额外 token，同时不会截断汉字。
+        const bool has_complete_trailing_boundary =
+            !aggregated_content.empty() &&
+            std::isspace(static_cast<unsigned char>(aggregated_content.back()));
+        if (max_candidates > 0 &&
+            partial_candidates.size() >= max_candidates &&
+            has_complete_trailing_boundary) {
+          close_all();
+          return true;
         }
       }
       if (finished) {
-        WinHttpCloseHandle(hRequest);
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
+        close_all();
         return !response_body.empty();
       }
     }
   }
 
-  WinHttpCloseHandle(hRequest);
-  WinHttpCloseHandle(hConnect);
-  WinHttpCloseHandle(hSession);
-  return !response_body.empty();
+  const bool succeeded = !cancelled() && !response_body.empty();
+  close_all();
+  return succeeded;
 }
 
 std::vector<std::wstring> OpenAICompatibleProvider::ParseResponse(

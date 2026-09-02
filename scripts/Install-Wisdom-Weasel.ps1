@@ -178,8 +178,16 @@ function Get-WeaselManagedOllamaPatchLines {
     ('  "llm/openai/api_url": "{0}"' -f $ApiUrl),
     '  "llm/openai/api_key": ""',
     ('  "llm/openai/model": "{0}"' -f $ModelName),
-    '  "llm/openai/max_tokens": 20',
-    '  "llm/openai/temperature": "0.6"',
+    '  "llm/openai/max_tokens": 32',
+    '  "llm/openai/temperature": "0.3"',
+    '  "llm/openai/top_p": "0.9"',
+    '  "llm/openai/presence_penalty": "0.0"',
+    '  "llm/openai/frequency_penalty": "0.0"',
+    '  "llm/ollama/num_ctx": 1024',
+    '  "llm/ollama/num_predict": 32',
+    '  "llm/ollama/top_k": 20',
+    '  "llm/ollama/repeat_penalty": "1.0"',
+    '  "llm/ollama/keep_alive": "30m"',
     '  # <<< Wisdom-Weasel managed Ollama config end <<<'
   )
 }

@@ -155,7 +155,9 @@ static LLMDispatchProfile GetLLMDispatchProfile(LLMRequestType request_type) {
       return {LLMDispatchLane::Interactive, 0, 180, L"有拼音补全"};
     case LLMRequestType::NoInputPrediction:
     default:
-      return {LLMDispatchLane::Background, 350, 450, L"无输入预测"};
+      // 单次 Ollama Chat 已不再触发五轮串行生成，可缩短后台静默窗口；
+      // 仍保留 180 ms，用来合并连续提交并优先让实时打字/重排通道执行。
+      return {LLMDispatchLane::Background, 180, 900, L"无输入预测"};
   }
 }
 
@@ -3577,6 +3579,9 @@ void RimeWithWeaselHandler::_TriggerLLMPrediction(
 
   // 拷贝必要参数到后台线程
   LLMRequest request_copy = prediction_request;
+  request_copy.is_cancelled = [this, request_seq]() {
+    return request_seq != m_llm_request_seq.load(std::memory_order_acquire);
+  };
   const std::wstring generation_provider_name =
       generation_available ? u8tow(generation_provider->GetProviderName())
                            : std::wstring();

@@ -21,6 +21,9 @@ struct LLMRequest {
   std::vector<std::wstring>
       rime_candidates;  // 候选池；重排时可包含 Rime+LLM 去重结果
   size_t max_candidates = 5;
+  // 由调度层提供的取消检查。新输入到达后，旧请求应尽快停止网络读取和
+  // 后端生成，避免虽然不再上屏、却仍持续占用 Ollama/GPU 的情况。
+  std::function<bool()> is_cancelled;
 };
 
 using LLMPartialCallback =
@@ -89,12 +92,14 @@ class OpenAICompatibleProvider : public LLMProvider {
                           size_t max_candidates,
                           const LLMPartialCallback& on_partial,
                           std::string& response_body);
-  bool ExecuteOllamaGenerateRequest(const std::string& url,
-                                    const std::string& request_body,
-                                    const std::string& prompt_prefix_utf8,
-                                    size_t max_candidates,
-                                    const LLMPartialCallback& on_partial,
-                                    std::string& response_body);
+  bool ExecuteOllamaChatRequest(
+      const std::string& url,
+      const std::string& request_body,
+      LLMRequestType request_type,
+      size_t max_candidates,
+      const LLMPartialCallback& on_partial,
+      const std::function<bool()>& is_cancelled,
+      std::string& response_body);
   // 解析JSON响应
   std::vector<std::wstring> ParseResponse(const std::string& json_response,
                                           LLMRequestType request_type);
@@ -111,6 +116,11 @@ class OpenAICompatibleProvider : public LLMProvider {
   double m_frequency_penalty;
   bool m_has_seed;
   int m_seed;
+  int m_ollama_num_ctx;
+  int m_ollama_num_predict;
+  int m_ollama_top_k;
+  double m_ollama_repeat_penalty;
+  std::string m_ollama_keep_alive;
   std::string m_extra_body_json;
   std::vector<std::pair<std::string, std::string>> m_extra_headers;
   void* m_hSession;       // HINTERNET，复用的 WinHTTP 会话
