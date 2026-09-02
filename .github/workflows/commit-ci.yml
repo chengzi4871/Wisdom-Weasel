@@ -35,7 +35,9 @@ jobs:
 
       - name: Code style lint
         shell: bash
-        run: ./clang-format.sh -i
+        # Windows 工作树可能不会保留 shell 脚本的可执行位；显式交给 bash
+        # 执行，避免 CI 在真正编译前因 Permission denied 退出。
+        run: bash ./clang-format.sh -i
 
   build:
     needs: lint
