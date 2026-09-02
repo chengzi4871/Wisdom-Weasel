@@ -1831,9 +1831,18 @@ bool RimeWithWeaselHandler::_TryScheduleLLMForCurrentComposition(
   const bool require_rime_candidates = false;
   const bool has_traditional_candidates = rime_candidate_count > 0;
   const bool rerank_was_suppressed = event_time < m_llm_rerank_suppressed_until;
-  const bool translation_provider_available =
-      m_llm_enable_pinyin_constraint && m_pinyin_translation_provider &&
+  // 有拼音预测优先使用专用 V2 翻译器；未部署该可选服务时，直接复用已经
+  // 配置成功的主 LLM 提供者（例如 Ollama）。旧逻辑把主提供者限制为仅处理
+  // “无输入预测”，导致安装器虽然正确配置了 Ollama，普通拼音输入却永远不
+  // 会发起请求。
+  const bool dedicated_translation_available =
+      m_pinyin_translation_provider &&
       m_pinyin_translation_provider->IsAvailable();
+  const bool main_translation_available =
+      m_llm_provider && m_llm_provider->IsAvailable();
+  const bool translation_provider_available =
+      m_llm_enable_pinyin_constraint &&
+      (dedicated_translation_available || main_translation_available);
   const bool has_pinyin_translation_provider =
       translation_provider_available && !current_input.empty();
   const bool has_pinyin_rerank_provider =
@@ -3363,7 +3372,9 @@ void RimeWithWeaselHandler::SetDevConsole(DevConsole* dev_console) {
           L"[LLM] 请检查配置：llm/enabled 和 llm/openai/api_key");
     } else {
       std::wstring provider_name = u8tow(m_llm_provider->GetProviderName());
-      m_dev_console->WriteLine(L"[LLM] LLM提供者已就绪: " + provider_name);
+      // IsAvailable() 只校验本地配置，不能证明远端或本机 Ollama 端口正在
+      // 监听。这里明确写成“配置已就绪”，避免服务已退出时误导诊断。
+      m_dev_console->WriteLine(L"[LLM] LLM提供者配置已就绪: " + provider_name);
     }
     if (m_pinyin_rerank_provider && m_pinyin_rerank_provider->IsAvailable()) {
       m_dev_console->WriteLine(
@@ -3377,6 +3388,10 @@ void RimeWithWeaselHandler::SetDevConsole(DevConsole* dev_console) {
       m_dev_console->WriteLine(
           L"[LLM] 有拼音异步翻译器已就绪: " +
           u8tow(m_pinyin_translation_provider->GetProviderName()));
+    } else if (m_llm_provider && m_llm_provider->IsAvailable()) {
+      m_dev_console->WriteLine(
+          L"[LLM] 有拼音异步生成已复用主提供者: " +
+          u8tow(m_llm_provider->GetProviderName()));
     } else {
       m_dev_console->WriteLine(L"[LLM] 有拼音异步翻译器未启用或不可用");
     }
@@ -3411,9 +3426,13 @@ void RimeWithWeaselHandler::_TriggerLLMPrediction(
     uint64_t ui_update_not_before) {
   const bool is_no_input_request =
       request_type == LLMRequestType::NoInputPrediction;
-  LLMProvider* generation_provider = is_no_input_request
-                                         ? m_llm_provider.get()
-                                         : m_pinyin_translation_provider.get();
+  // 专用拼音翻译器是可选增强项。缺少它时复用主 LLM，确保安装器默认配置的
+  // Ollama 同时支持无输入续写和有拼音补充候选。
+  LLMProvider* generation_provider = m_llm_provider.get();
+  if (!is_no_input_request && m_pinyin_translation_provider &&
+      m_pinyin_translation_provider->IsAvailable()) {
+    generation_provider = m_pinyin_translation_provider.get();
+  }
   LLMProvider* rerank_provider =
       is_no_input_request ? nullptr : m_pinyin_rerank_provider.get();
   const bool generation_available =

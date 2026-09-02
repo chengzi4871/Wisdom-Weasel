@@ -5,6 +5,7 @@
 
 #include "resource.h"
 #include "WeaselUtility.h"
+#include <cwctype>
 #include <thread>
 
 #include "InstallOptionsDlg.h"
@@ -143,10 +144,25 @@ static int CustomInstall(bool installing) {
   return 0;
 }
 
-LPCTSTR GetParamByPrefix(LPCTSTR lpCmdLine, LPCTSTR prefix) {
-  return (wcsncmp(lpCmdLine, prefix, wcslen(prefix)) == 0)
-             ? (lpCmdLine + wcslen(prefix))
-             : 0;
+std::wstring GetParamByPrefix(LPCTSTR lpCmdLine, LPCTSTR prefix) {
+  if (wcsncmp(lpCmdLine, prefix, wcslen(prefix)) != 0) {
+    return {};
+  }
+
+  std::wstring value(lpCmdLine + wcslen(prefix));
+  // Start-Process 可能在拼接原生命令行参数时保留尾随空白。路径参数若原样
+  // 写入注册表，Rime 会把“Rime ”视为另一个目录，并可能在部署时崩溃。
+  // 同时兼容显式用引号包裹路径的调用方。
+  while (!value.empty() && std::iswspace(value.back())) {
+    value.pop_back();
+  }
+  while (!value.empty() && std::iswspace(value.front())) {
+    value.erase(value.begin());
+  }
+  if (value.size() >= 2 && value.front() == L'"' && value.back() == L'"') {
+    value = value.substr(1, value.size() - 2);
+  }
+  return value;
 }
 
 static int Run(LPTSTR lpCmdLine) {
@@ -189,9 +205,9 @@ static int Run(LPTSTR lpCmdLine) {
       return RestartAsAdmin(lpCmdLine);
   }
 
-  if (auto res = GetParamByPrefix(lpCmdLine, L"/userdir:")) {
+  if (auto res = GetParamByPrefix(lpCmdLine, L"/userdir:"); !res.empty()) {
     return SetRegKeyValue(HKEY_CURRENT_USER, L"Software\\Rime\\weasel",
-                          L"RimeUserDir", res, REG_SZ);
+                          L"RimeUserDir", res.c_str(), REG_SZ);
   }
 
   if (!wcscmp(L"/ls", lpCmdLine)) {

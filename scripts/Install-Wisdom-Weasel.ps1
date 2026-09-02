@@ -16,6 +16,7 @@
   [string]$OllamaBaseUrl = 'http://127.0.0.1:11434',
   [string]$OllamaInstallScriptUrl = 'https://ollama.com/install.ps1',
   [string]$OllamaInstallerUrl = 'https://ollama.com/download/OllamaSetup.exe',
+  [string]$WanxiangGrammarModelUrl = 'https://github.com/amzxyz/RIME-LMDG/releases/download/LTS/wanxiang-lts-zh-hans.gram',
   [switch]$SkipOllamaSetup,
   [switch]$SkipGuiGuide,
   [switch]$SkipDeploy
@@ -45,6 +46,41 @@ function Get-OllamaChatCompletionsUrl {
   param([string]$BaseUrl)
 
   return ($BaseUrl.TrimEnd('/') + '/v1/chat/completions')
+}
+
+function Install-WanxiangGrammarModel {
+  param(
+    [string]$RimeDir,
+    [string]$DownloadUrl
+  )
+
+  if ([string]::IsNullOrWhiteSpace($DownloadUrl)) {
+    Write-Warning '未配置万象语法模型下载地址，将跳过语法模型安装。'
+    return
+  }
+
+  $targetPath = Join-Path $RimeDir 'wanxiang-lts-zh-hans.gram'
+  if ((Test-Path -LiteralPath $targetPath) -and
+      (Get-Item -LiteralPath $targetPath).Length -gt 1MB) {
+    Write-Host "万象语法模型已存在：$targetPath"
+    return
+  }
+
+  # 先下载到同目录临时文件，完成基本长度校验后再替换正式文件，避免网络
+  # 中断时留下名称正确但内容残缺的 gram 文件，使 librime 反复加载失败。
+  New-Item -ItemType Directory -Path $RimeDir -Force | Out-Null
+  $temporaryPath = "$targetPath.download-$([guid]::NewGuid().ToString('N'))"
+  try {
+    Write-Host "==> 下载万象语法模型：$DownloadUrl"
+    Invoke-WebRequest -Uri $DownloadUrl -OutFile $temporaryPath
+    if ((Get-Item -LiteralPath $temporaryPath).Length -le 1MB) {
+      throw '下载得到的万象语法模型体积异常，拒绝安装。'
+    }
+    Move-Item -LiteralPath $temporaryPath -Destination $targetPath -Force
+    Write-Host "万象语法模型已安装：$targetPath"
+  } finally {
+    Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function New-TimestampString {
@@ -83,6 +119,7 @@ function Ensure-Elevated {
   if ($OllamaBaseUrl) { $argList += @('-OllamaBaseUrl', ('"{0}"' -f $OllamaBaseUrl)) }
   if ($OllamaInstallScriptUrl) { $argList += @('-OllamaInstallScriptUrl', ('"{0}"' -f $OllamaInstallScriptUrl)) }
   if ($OllamaInstallerUrl) { $argList += @('-OllamaInstallerUrl', ('"{0}"' -f $OllamaInstallerUrl)) }
+  if ($WanxiangGrammarModelUrl) { $argList += @('-WanxiangGrammarModelUrl', ('"{0}"' -f $WanxiangGrammarModelUrl)) }
   if ($SkipOllamaSetup) { $argList += '-SkipOllamaSetup' }
   if ($SkipGuiGuide) { $argList += '-SkipGuiGuide' }
   if ($SkipDeploy) { $argList += '-SkipDeploy' }
@@ -1674,6 +1711,7 @@ $hadExistingAlphaModel = Test-AlphaModelInstalled -ModelRoot $targetModelRoot
 
 Write-Host "==> 安装万象到 $RimeUserDir"
 & (Join-Path $sourceRoot 'scripts\Install-RimeWanxiang.ps1') -RimeUserDir $RimeUserDir -SourceRoot $sourceRoot
+Install-WanxiangGrammarModel -RimeDir $RimeUserDir -DownloadUrl $WanxiangGrammarModelUrl
 Sync-AlphaRuntimeToRime -RuntimeRoot $runtimeDir -InstallRoot $InstallDir -RimeDir $RimeUserDir -SourceRoot $sourceRoot
 
 $effectiveModelSetup = $ModelSetup
